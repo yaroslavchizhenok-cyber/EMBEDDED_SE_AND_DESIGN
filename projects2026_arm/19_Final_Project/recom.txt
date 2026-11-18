@@ -1,0 +1,120 @@
+Drone swarm parade - recommended way to build it on this setup
+================================================================
+2026-11-17. Based on lesson 14 (14_Drone_Missions) as it stands today.
+
+VERDICT
+-------
+Feasible. Run the swarm on the PC, using lesson 14's own flight code.
+Do not put the swarm on the simulated chips.
+
+
+WHY NOT ON THE CHIP / IN WOKWI
+------------------------------
+- One STM32C031C6 (12 KB RAM, 32 KB flash) is nearly full: RAM 10 392 B used
+  (about 1.9 KB left, interrupt stack included), flash 30 120 B (92 %).
+  One drone's state is about 812 B (world_t 212 B + fc_t 600 B).
+  At most 2-3 drones would fit, and only after trimming.
+- flight.c holds a single "static fc_t fc", so the code is written for exactly
+  one drone.
+- Wokwi already runs one drone at about half speed.
+- Several Wokwi boards (one drone each) would each fall into slow motion at
+  their own rate (overrun guard, separate world.t_ms clocks), so a formation
+  drifts apart. There is also no radio between boards: everything would have to
+  go through the PC over 115 200-baud serial.
+
+
+THE RECOMMENDED DESIGN
+----------------------
+The design copies real drone light shows. They are not swarm intelligence:
+each drone follows its own pre-planned, time-stamped track, one ground
+station keeps everyone on the same clock, and the spacing between drones is
+checked before take-off. No drone talks to another.
+
+  formation file --> planner --> per-drone timed tracks
+                                        |
+                                        v
+              orchestrator (one clock, lock-step)
+              steps N x [world.c + flight.c] on the PC
+                                        |
+                                        v
+                       station view (N drones, 3D + map)
+
+  optional: the Wokwi board flies as drone 0 (the "lead"),
+            and the PC drones step to its $TRU time stamp.
+
+
+STEPS
+-----
+1. Make the flight computer handle many drones.
+   Change flight.c so every function takes an fc_t* instead of using the
+   static "fc". Keep fc_get() as a thin wrapper over one default instance,
+   so lesson 14's firmware and host tests stay unchanged.
+   Check: host/run.bat still passes, and the firmware still builds with
+   zero warnings at the same size.
+
+2. Add a timed-setpoint mode.
+   Today a waypoint means "go here at CRUISE speed", so arrival time depends
+   on the wind and neighbouring drones drift out of formation. Add a mode in
+   which the PC feeds each drone a moving setpoint (x, y, alt) 5-10 times a
+   second, and the position -> velocity -> tilt cascade tracks it, using the
+   setpoint's velocity as feed-forward. HOLD with a movable hold point
+   (fc_nudge) is already close to this.
+
+3. Build the swarm library for the PC (shared library, called from Python).
+   Compile world.c + flight.c + fm.c with MinGW gcc into a DLL, as section
+   9e of the root CLAUDE.md already proved works with ctypes. Export:
+     swarm_init(n, seed), swarm_set_target(i, x, y, z, vx, vy, vz),
+     swarm_step() (all drones, one world tick), swarm_state(i, ...),
+     plus the struct sizes, so Python refuses to run if the layout disagrees.
+   Give each drone its own seed (own gusts and GPS error), with wind shared.
+
+4. Write the planner (Python).
+   Input is a list of formations with hold times (line, V, circle, grid,
+   letters - lesson 14's "yc" mission already writes YC). Output is a timed
+   track for every drone:
+   - assign drones to slots so total travel is smallest (Hungarian
+     algorithm; scipy, or a greedy pass for small N);
+   - move between formations along straight lines with a smooth
+     (trapezoidal) speed profile, and cap speed and acceleration below what
+     the drone can follow in wind;
+   - check minimum separation (for example 2 m, larger than the about 1-2 m
+     tracking error measured in wind) at every time step BEFORE flying.
+     If any pair gets too close, delay one drone's move or raise its
+     altitude.
+
+5. Write the orchestrator (Python).
+   One loop: read each drone's target from its track at time t, call
+   swarm_set_target, call swarm_step, then t += 10 ms. In real time for a
+   show, or as fast as possible for scoring. Record, for every drone, the
+   formation error (true position minus slot) and the closest approach
+   between any two drones.
+
+6. Add a station view (tools/station/views/).
+   Reuse scene3d.py (camera, projection) and the lesson 14 map view. Draw
+   the N drones, their slots, and the separation warnings. Feed the view
+   from the orchestrator directly; for the PC drones the serial port is not
+   needed at all.
+
+7. Optional: keep the chip in the loop.
+   Run the Wokwi board as drone 0. The station sends it its timed setpoints
+   over the existing $-frame link (one new frame, e.g. $SP,t,x,y,alt), and
+   the PC drones step to the board's $TRU time stamp instead of their own
+   clock, so the board's slow motion does not tear the formation.
+
+
+SCORING (useful for a class contest)
+------------------------------------
+- RMS and maximum formation error, per drone and overall.
+- Closest approach between any two drones (must stay above the limit).
+- Time to settle into each formation.
+- Same seed, same result: runs are deterministic, so they can be compared
+  fairly.
+
+
+SIZE OF THE JOB
+---------------
+Steps 1-6 are all PC-side apart from the small change to flight.c. No new
+hardware or simulator is needed, the pieces already exist here (MinGW gcc,
+ctypes, uv Python, the station, scene3d.py), and dozens of drones run easily
+on a PC. Step 7 is the only part that touches the firmware or Wokwi, and it
+can come last.

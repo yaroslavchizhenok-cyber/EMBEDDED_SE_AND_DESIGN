@@ -1,0 +1,14 @@
+# 19_Final_Project - Swarm parade.  The Wokwi VS Code extension reads this.
+#
+#   1. build.bat
+#   2. F1 -> "Wokwi: Select Config File" -> this file
+#      F1 -> "Wokwi: Start Simulator"
+#   3. run.bat - the station
+[wokwi]
+version = 1
+firmware = 'Main.hex'
+elf = 'Main.elf'
+# Serial port forwarding: the simulated USART2 becomes a TCP server that the
+# station (run.bat) reaches as rfc2217://localhost:4000.
+rfc2217ServerPort = 4000
+gdbServerPort = 3333   # F5 in VS Code attaches arm-none-eabi-gdb here; see .vscode/launch.json

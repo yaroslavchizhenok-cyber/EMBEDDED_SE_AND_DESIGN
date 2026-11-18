@@ -1,0 +1,20 @@
+[project]
+name = "embedded-se-and-design"
+version = "2026.11"
+description = "Swarm parade: five drones plan, fly and score a light show on an STM32C031C6 - the PC side (station, host tools)"
+readme = "README.md"
+requires-python = ">=3.12"
+
+# What the PC side needs.  After cloning:   uv sync
+dependencies = [
+    "pyserial>=3.5",      # tools/station (the station talks to Wokwi's serial port)
+]
+
+[dependency-groups]
+# Only for drawing the station view off-screen to a PNG.     uv sync --group docs
+docs = ["pillow>=10"]
+
+[tool.uv]
+# Not a library: uv sync makes the environment and installs nothing of its own.
+# uv's own Python builds include tkinter, which the station needs.
+package = false

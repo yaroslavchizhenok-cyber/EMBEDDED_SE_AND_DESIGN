@@ -1,0 +1,24 @@
+# The ARM toolchain is ~230 MB: unpack it here locally (README, "Set up").
+tools/arm-toolchain/
+
+# Build outputs, derived from the sources beside them
+projects2026_arm/**/Main.elf
+projects2026_arm/**/Main.hex
+projects2026_arm/**/Main.bin
+projects2026_arm/**/Main.map
+projects2026_arm/**/*.o
+projects2026_arm/19_Final_Project/host/out/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Wokwi licence keys are personal credentials: never commit them
+wokwi*licence*
+wokwi*license*
+*.wokwi-license
+
+# Editors
+.vs/
+*.tmp

@@ -1,0 +1,30 @@
+# parade.show - five drones, a two-minute parade
+#
+# The audience stands south of the pads, looking north.  "plane=wall"
+# formations stand up facing them (a light show's usual canvas); the others
+# lie flat, for the map.  x east, y north, z up, metres; the pads are in a
+# row along x at y = 0, centred on 0.
+#
+#   uv run planner.py shows/parade.show       the plan and its check
+#   uv run show.py shows/parade.show          fly it, fast, and score it
+
+drones   5
+pads     4        # m between launch pads
+takeoff  5        # m - everyone climbs straight up to this first
+vmax     3        # m/s   - the fastest any drone is asked to fly
+vzmax    1.5      # m/s   - ...climbing or sinking
+amax     1        # m/s^2 - the hardest any drone is asked to speed up or brake
+sep      3        # m - planned: no two drones closer than this, ever
+safe     1        # m - flown: the score FAILS if two drones come closer
+settle   0.5      # m - "in formation" = every drone within this of its slot
+wind     3 30     # m/s, blowing toward degrees (0 = east, 90 = north)
+gps      rtk      # rtk: 2 cm, as show drones fly;  plain: lesson 14's ~0.5 m
+
+#     shape   hold  options (x y z = centre; size = across, m; turn = degrees)
+form  line    5     y=8  z=8   size=16 plane=wall
+form  v       6     y=10 z=11  size=12 plane=wall
+form  circle  8     y=10 z=12  size=10 plane=wall
+form  heart   8     y=10 z=13  size=14 plane=wall
+form  cross   6     y=10 z=10  size=10
+form  v       6     y=10 z=10  size=12 turn=180  name=arrow
+form  circle  6     y=10 z=14  size=14 turn=45   plane=wall name=wide
