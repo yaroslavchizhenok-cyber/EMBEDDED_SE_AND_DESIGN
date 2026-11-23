@@ -18,6 +18,11 @@
 #include "contract.h"
 
 #define SHOW_MAX_FORMS 10
+/* Drones in one show.  Every chip holds the whole plan (so it can be checked
+ * on every chip), and that plan has a row per drone: 5 on this chip's RAM. */
+#ifndef SHOW_MAX_DRONES
+#define SHOW_MAX_DRONES 5
+#endif
 
 enum { SH_LINE, SH_V, SH_CIRCLE, SH_CROSS, SH_GRID, SH_HEART, SH_POINTS, SH_COUNT };
 enum { FLAT, WALL };         /* lying flat (seen from above) / standing up, facing south */
@@ -35,7 +40,7 @@ typedef struct {
 
 typedef struct {
     const char *name;
-    uint8_t drones;          /* how many fly, 1 .. FLEET_MAX                      */
+    uint8_t drones;          /* how many fly, 1 .. SHOW_MAX_DRONES                      */
     float   pads;            /* m between launch pads                             */
     float   takeoff;         /* m - everyone first climbs straight up to this     */
     float   vmax, vzmax;     /* m/s - fastest any drone is asked to fly / climb   */

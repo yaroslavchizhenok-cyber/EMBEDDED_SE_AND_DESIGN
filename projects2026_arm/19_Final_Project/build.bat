@@ -10,6 +10,7 @@ REM    show.c      THE SHOW - edit it to make your own
 REM    fleet.c     N drones on one clock
 REM    pilot.c     one drone's flight computer      craft.c  one drone's airframe
 REM    fmt.c       a small snprintf     trig.c  sin/cos/sqrt, compiled once
+REM    softfloat.c float + - * / and compares, in place of libgcc's slower ones
 REM  From _lib\:
 REM    retarget  the C library stubs (its weak polled _write is replaced by uart's)
 REM    os        the kernel         uart proto   interrupt UART, $frames

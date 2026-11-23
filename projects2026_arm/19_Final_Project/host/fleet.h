@@ -7,10 +7,12 @@
  * lock-step a real light show gets from GPS time.  Pilots run on every
  * second tick (50 Hz).
  *
- * The chip holds FLEET_MAX drones (about 520 B of RAM each); the PC build
- * (host/) raises it with -DFLEET_MAX=64.
+ * PC only now.  The chips each fly ONE drone (../drone.c); this array of
+ * drones is what the one-chip reference (director.c) and swarm.dll (64
+ * drones, for show.py) still use.  FLEET_MAX is 5 for the reference and
+ * -DFLEET_MAX=64 for swarm.dll.
  *
- * Pure C, no hardware: the firmware and host/ compile the same file.
+ * Pure C, no hardware.
  */
 #ifndef FLEET_H
 #define FLEET_H

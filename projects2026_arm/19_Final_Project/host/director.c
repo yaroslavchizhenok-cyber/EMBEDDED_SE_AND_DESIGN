@@ -37,13 +37,19 @@ static void say(director_t *d, const char *f, ...) __attribute__((format(printf,
 
 static void frame(director_t *d, int must, const char *f, ...)
 {
-    char body[112], line[124];
+    /* The body is formatted straight into its place behind the '$', and only
+     * the checksum is added after it.  (Formatting it into a buffer of its
+     * own and then "$%s*%02X" copied every character a second time - a
+     * tenth of a tick - and kept 112 more bytes on fly's stack.) */
+    enum { BODY = 112 };
+    char line[BODY + 12];
     va_list ap;
     va_start(ap, f);
-    int n = fmt_v(body, sizeof body, f, ap);
+    int n = fmt_v(line + 1, BODY, f, ap);
     va_end(ap);
-    if (n <= 0 || n >= (int)sizeof body) { return; }
-    fmt(line, sizeof line, "$%s*%02X\r\n", body, proto_checksum(body, (size_t)n));
+    if (n <= 0 || n >= BODY) { return; }
+    line[0] = '$';
+    fmt(line + 1 + n, 8, "*%02X\r\n", proto_checksum(line + 1, (size_t)n));
     d->emit(line, must);
 }
 
@@ -60,11 +66,17 @@ static void say(director_t *d, const char *f, ...)
     d->emit(line, 1);
 }
 
-static float dist(v3_t a, v3_t b)
+static float dist2(v3_t a, v3_t b)                     /* squared: no root */
 {
     float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-    return t_sqrt(dx * dx + dy * dy + dz * dz);
+    return dx * dx + dy * dy + dz * dz;
 }
+
+static float dist(v3_t a, v3_t b) { return t_sqrt(dist2(a, b)); }
+
+/* A squared distance above this is surely farther than d, so the pair cannot
+ * be the new closest - no square root needed to know (plan.c does the same) */
+static float beyond(float d) { return d * d * 1.00002f; }
 
 /* ---- set-up ---------------------------------------------------------------- */
 void director_reset(director_t *d)
@@ -100,6 +112,7 @@ int director_init(director_t *d, const show_t *s, emit_fn emit)
     memset(d, 0, sizeof *d);
     d->emit = emit;
     d->seed = 1u;
+    d->stride = 1;
     d->wind = s->wind;  d->wind_deg = s->wind_deg;
     d->rtk = s->rtk;
     d->feedforward = 1;
@@ -233,11 +246,17 @@ static void score(director_t *d, float t, int k, const stage_t *s, const v3_t *w
             if (worst > p->show->settle) { d->last_bad[k] = t; }
         }
     }
+    float lim = beyond(d->closest);
     for (int i = 0; i < p->n; i++) {
         for (int j = i + 1; j < p->n; j++) {
             if (fleet_grounded(i) && fleet_grounded(j)) { continue; }
-            float dd = dist(at[i], at[j]);
-            if (dd < d->closest) { d->closest = dd;  d->closest_t = t;  d->ci = (uint8_t)i;  d->cj = (uint8_t)j; }
+            float q = dist2(at[i], at[j]);
+            if (q > lim) { continue; }
+            float dd = t_sqrt(q);
+            if (dd < d->closest) {
+                d->closest = dd;  d->closest_t = t;  d->ci = (uint8_t)i;  d->cj = (uint8_t)j;
+                lim = beyond(dd);
+            }
         }
     }
 }
@@ -250,19 +269,34 @@ static float rms_of(float sq, uint32_t n) { return n ? t_sqrt(sq / (float)n) : 0
  * are ~390 B, more than uart.c's 256 B transmit ring holds - the later
  * drones' lines would be the ones that never fit.  One line a tick (~60 B)
  * always fits, and the UART sends it long before the next.
- * part < 0: every line now (the final picture, and the warm-up on the pads). */
+ * part < 0: every line now (the final picture, and the warm-up on the pads).
+ * want: where the plan has each drone now, if the caller has it already
+ * (the tick does) - or 0, and drn() works it out. */
 static void swm(director_t *d, unsigned long t_ms, int k, const stage_t *s);
-static void drn(director_t *d, float t, const stage_t *s, int i);
+static void drn(director_t *d, float t, const stage_t *s, int i, const v3_t *want);
 static void sep(director_t *d, unsigned long t_ms);
 static void sco(director_t *d, int must);
 
-static void frames(director_t *d, float t, int k, const stage_t *s, int part)
+/* Which line of the report this tick sends: 0 the $SWM, 1..n a $DRN, n + 1
+ * the $SEP - or -1, none.  Played at real time (stride 1) a report is EVERY
+ * ticks long and each tick has its line.  Played at N x real time the ticks
+ * come N times as fast, and the UART - 11.5 KB a second, whatever the show
+ * does - could not carry N reports' worth: lines would be dropped, the same
+ * drones' lines every time.  So only every N-th report is sent, its lines N
+ * ticks apart: in real time, exactly the picture rate of stride 1. */
+static int report_part(const director_t *d, uint32_t tick)
+{
+    uint32_t n = d->stride ? d->stride : 1u, at = tick % (EVERY * n);
+    return at % n ? -1 : (int)(at / n);
+}
+
+static void frames(director_t *d, float t, int k, const stage_t *s, int part, const v3_t *want)
 {
     const plan_t *p = &d->plan;
     unsigned long t_ms = (unsigned long)(t * 1000.0f + 0.5f);
     if (part == 0 || part < 0) { swm(d, t_ms, k, s); }
     for (int i = 0; i < p->n; i++) {
-        if (part == 1 + i || part < 0) { drn(d, t, s, i); }
+        if (part == 1 + i || part < 0) { drn(d, t, s, i, want ? &want[i] : 0); }
     }
     if (part == 1 + p->n || part < 0) { sep(d, t_ms); }
 }
@@ -282,13 +316,13 @@ static void swm(director_t *d, unsigned long t_ms, int k, const stage_t *s)
           d->paused ? "PAUSED" : director_state_name(d->state));
 }
 
-static void drn(director_t *d, float t, const stage_t *s, int i)
+static void drn(director_t *d, float t, const stage_t *s, int i, const v3_t *planned)
 {
     const plan_t *p = &d->plan;
     fleet_drone_t v;
     v3_t want, vel, slot = plan_stage_end(p, s, i);
     fleet_view(i, &v);
-    plan_sample(p, s, i, t, &want, &vel);
+    if (planned) { want = *planned; } else { plan_sample(p, s, i, t, &want, &vel); }
     frame(d, 0, "DRN,%d,%s,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld", i, pilot_mode_name(v.mode),
           cm(v.x), cm(v.y), cm(v.z), cm(want.x), cm(want.y), cm(want.z),
           cm(slot.x), cm(slot.y), cm(slot.z), (long)(v.charge + 0.5f),
@@ -298,13 +332,15 @@ static void drn(director_t *d, float t, const stage_t *s, int i)
 static void sep(director_t *d, unsigned long t_ms)
 {
     const plan_t *p = &d->plan;
-    float near = 1e9f;
+    float near = 1e9f, lim = beyond(near);
     int ni = 0, nj = 0;
     for (int i = 0; i < p->n; i++) {
         for (int j = i + 1; j < p->n; j++) {
             if (fleet_grounded(i) && fleet_grounded(j)) { continue; }
-            float dd = dist(fleet_where(i), fleet_where(j));
-            if (dd < near) { near = dd;  ni = i;  nj = j; }
+            float q = dist2(fleet_where(i), fleet_where(j));
+            if (q > lim) { continue; }
+            float dd = t_sqrt(q);
+            if (dd < near) { near = dd;  ni = i;  nj = j;  lim = beyond(dd); }
         }
     }
     if (near < 1e8f) {
@@ -329,7 +365,7 @@ static void finish(director_t *d, float t, int k, const stage_t *s)
     d->rms = rms_of(sq, n);
     d->passed = (uint8_t)(!d->aborted && d->closest >= p->show->safe && d->landed == p->n);
     d->state = DR_DONE;
-    frames(d, t, k, s, -1);                             /* the final state: everyone down */
+    frames(d, t, k, s, -1, 0);                          /* the final state: everyone down */
     sco(d, 1);
     director_report(d);
 }
@@ -359,7 +395,7 @@ void director_heartbeat(director_t *d, uint32_t beat)
     const stage_t *s = plan_stage(p, t, &k);
     int part = (int)(beat % EVERY);
     if (d->state == DR_DONE && part == 9) { sco(d, 0); }
-    else { frames(d, t, k, s, part); }
+    else { frames(d, t, k, s, part, 0); }
 }
 
 void director_report(director_t *d)
@@ -429,7 +465,8 @@ int director_tick(director_t *d)
     if (d->state == DR_WARMUP) {
         fleet_step();
         d->warm++;
-        if (!d->quiet) { frames(d, 0.0f, 0, &p->st[0], (int)(d->warm % EVERY)); }   /* one line a tick */
+        int part = report_part(d, d->warm);                         /* one line a tick */
+        if (!d->quiet && part >= 0) { frames(d, 0.0f, 0, &p->st[0], part, 0); }
         if (d->warm >= WARM_TICKS) {
             d->state = DR_READY;
             if (d->start_pending) { arm_all(d); }
@@ -443,7 +480,7 @@ int director_tick(director_t *d)
     int k;
     const stage_t *s = plan_stage(p, t, &k);
     v3_t want[FLEET_MAX], vel[FLEET_MAX];
-    for (int i = 0; i < p->n; i++) { plan_sample(p, s, i, t, &want[i], &vel[i]); }
+    plan_sample_all(p, s, t, want, vel);
 
     int following = !(d->landing_sent || d->aborted);
     if (d->ticks % EVERY == 0u && following) {
@@ -460,7 +497,8 @@ int director_tick(director_t *d)
     fleet_step();
     d->ticks++;
     score(d, t, k, s, want, !(d->landing_sent || d->aborted));
-    if (!d->quiet) { frames(d, t, k, s, (int)(d->ticks % EVERY)); }
+    int part = report_part(d, d->ticks);
+    if (!d->quiet && part >= 0) { frames(d, t, k, s, part, want); }
 
     int down = 1;
     for (int i = 0; i < p->n; i++) { if (fleet_mode(i) != PM_IDLE) { down = 0; } }

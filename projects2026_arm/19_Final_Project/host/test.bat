@@ -6,7 +6,7 @@ REM  Needs gcc on PATH (MinGW-w64) and uv.  Exit code 0 = every check passed.
 REM
 REM    out\test_show.exe   the firmware's show, flown on the PC: the SAME
 REM                        plan.c, director.c, fleet.c, pilot.c, craft.c,
-REM                        show.c and fmt.c the chip runs (31 checks)
+REM                        show.c and fmt.c the chip runs (32 checks)
 REM    out\swarm.dll       the firmware's fleet for Python, 64 drones:
 REM                        show.py, planner.py (test_swarm.py: 21 checks)
 REM

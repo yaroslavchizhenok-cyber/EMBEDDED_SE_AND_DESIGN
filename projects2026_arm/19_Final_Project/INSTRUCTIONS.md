@@ -37,7 +37,7 @@ the pads, looking north), a map from above, and every drone's numbers.
 To fly again after the score, press `a` again. To start from scratch, stop
 and start the simulator; the station reconnects by itself.
 
-**In Wokwi the show runs in slow motion**, because simulating five drones is
+**In Wokwi the show may run in slow motion**, when simulating five drones is
 more work than Wokwi's CPU can do in real time. Nothing is wrong: the show
 clock in the station's title line is the board's own clock. Type `stats` to
 see how fast it is running. On a real board it runs in real time.
@@ -102,7 +102,7 @@ draws the show instead.
 | `seed N` | a different set of gusts and GPS errors. The same seed always gives the same score |
 | `gps rtk` / `gps plain` | the GPS receivers: RTK (about 2 cm, as show drones use) or plain (about 0.5 m, as lesson 14) |
 | `ff on` / `ff off` | velocity feed-forward. Off sends positions only, and the drones trail their slots |
-| `speed 0\|1\|2\|5\|10` | times real time. 0 = as fast as the chip can. In Wokwi it is already slower than 1 |
+| `speed 0\|1\|2\|5\|10` | times real time; it starts at **2**. 0 = as fast as the chip can. If the chip or Wokwi cannot keep the speed asked, the show runs as fast as it can; `stats` says what it reaches. The station still gets about ten pictures a second at any speed |
 | `reset` | back on the pads |
 | `quiet` / `loud` | stop / restart the telemetry frames |
 | `help` | the list |
@@ -167,7 +167,7 @@ make that formation bigger.
 
 | | |
 |---|---|
-| `host\test.bat` | builds the show and the swarm for the PC and runs every check (31 + 21) |
+| `host\test.bat` | builds the show and the swarm for the PC and runs every check (32 + 21) |
 | `host\out\test_show --print` | flies `show.c`'s show on the PC in under a second and prints what the chip would print |
 | `host\out\test_show --frames` | the same, but prints every frame: a capture you can play into the station without Wokwi (see below) |
 | `uv run host\show.py host\shows\parade.show` | the PC version: Python planner, up to 64 drones (`host\shows\big.show` has 25). Options: `--seed N`, `--wind MS DEG`, `--gps rtk\|plain`, `--no-feedforward`, `--twice`, `--log FILE`, `--serve PORT` |

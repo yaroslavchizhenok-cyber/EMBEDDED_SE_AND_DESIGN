@@ -34,16 +34,32 @@ static uint32_t roll_dice(craft_t *c)
     return c->dice >> 8;                       /* 24 good bits                  */
 }
 
-static float flat(craft_t *c)                  /* uniform, -1 .. +1             */
+/* One uniform draw, -1 .. +1, in steps of 2^-23 - kept as the WHOLE number
+ * of steps (-2^23 .. 2^23 - 1): integer sums are nearly free on this chip,
+ * float sums are not. */
+static int32_t flat(craft_t *c) { return (int32_t)roll_dice(c) - 0x800000; }
+
+/* A sum of steps, rounded the way a float would hold it: from 2.0 up a
+ * float has only every second step, and a tie goes to the even one. */
+static int32_t as_float(int32_t s)
 {
-    return (float)roll_dice(c) * (2.0f / 16777216.0f) - 1.0f;
+    if ((s >= 0x1000000 || s <= -0x1000000) && (s & 1)) { s += (s & 2) ? 1 : -1; }
+    return s;
 }
 
 static float bell(craft_t *c)                  /* about normal, sigma 1         */
 {
     /* Four uniforms (variance 1/3 each) sum to variance 4/3; scaling by
-     * sqrt(3)/2 makes it 1.  The central limit theorem does the rest. */
-    return (flat(c) + flat(c) + flat(c) + flat(c)) * 0.8660254f;
+     * sqrt(3)/2 makes it 1.  The central limit theorem does the rest.
+     * This was ((f1 + f2) + f3) + f4 in floats - 16 float operations, ~1900
+     * cycles.  Summed in integers and rounded where those float sums
+     * rounded, it gives the SAME number, bit for bit, for one conversion and
+     * one multiply.  (2^-23 is a power of two: scaling by it rounds nothing.) */
+    int32_t s = flat(c);
+    s += flat(c);                              /* |s| < 2: exact as a float too */
+    s = as_float(s + flat(c));
+    s = as_float(s + flat(c));
+    return (float)s * (0.8660254f / 8388608.0f);
 }
 
 /* first-order lag: `now` moves toward `want` with time constant tau */
@@ -52,8 +68,26 @@ static float chase(float now, float want, float dt, float tau)
     return now + (want - now) * (dt / tau);
 }
 
+/* sqrt(2 dt / WANDER_LIFE) for the GPS error's random walk: a constant, but
+ * t_sqrt() is no compile-time function, so it is worked out once, here */
+static float wander_root;
+
+void craft_sky(sky_t *s, float speed, float toward)
+{
+    float sn, cs;
+    t_sincos(toward, &sn, &cs);
+    s->speed     = speed;
+    s->toward    = toward;
+    s->steady_x  = speed * cs;
+    s->steady_y  = speed * sn;
+    /* each gust axis relaxes toward zero over GUST_LIFE and is kicked by
+     * noise sized so it settles at GUST_SHARE of the steady wind */
+    s->gust_kick = GUST_SHARE * speed * t_sqrt(2.0f * AIR_DT / GUST_LIFE);
+}
+
 void craft_init(craft_t *c, uint32_t seed, float x, float y)
 {
+    wander_root = t_sqrt(2.0f * PILOT_DT / WANDER_LIFE);
     *c = (craft_t){ 0 };
     c->dice     = seed ? seed : 0x9E3779B9u;
     c->pos      = (v3_t){ x, y, 0.0f };
@@ -65,8 +99,12 @@ void craft_init(craft_t *c, uint32_t seed, float x, float y)
     for (unsigned k = 0; k <= FIX_LAG; k++) { c->trail_x[k] = x;  c->trail_y[k] = y; }
 }
 
-void craft_step(craft_t *c, const sky_t *sky, const cmd_t *cmd, float dt)
+void craft_step(craft_t *c, const sky_t *sky, const cmd_t *cmd)
 {
+    /* dt is a constant, so dt / LAG_TILT and the like are worked out by the
+     * compiler - a float division costs this chip ~190 cycles at run time */
+    const float dt = AIR_DT;
+
     /* 1. the rotors and the attitude loop answer the command, late */
     int   on   = cmd->live && c->charge > 0.0f;
     float want_lift = on ? f_clamp(cmd->lift, 0.0f, LIFT_LIM) : 0.0f;
@@ -79,19 +117,18 @@ void craft_step(craft_t *c, const sky_t *sky, const cmd_t *cmd, float dt)
     c->spin    = chase(c->spin, want_spin, dt, LAG_SPIN);
     c->heading = t_wrap(c->heading + c->spin * dt);
 
-    /* 2. the air: the shared steady wind plus this drone's own gust.  Each
-     * gust axis relaxes toward zero over GUST_LIFE and is kicked by noise
-     * sized so it settles at GUST_SHARE of the steady wind. */
-    float spread = GUST_SHARE * sky->speed * t_sqrt(2.0f * dt / GUST_LIFE);
-    c->gust_x += -c->gust_x * (dt / GUST_LIFE) + spread * bell(c);
-    c->gust_y += -c->gust_y * (dt / GUST_LIFE) + spread * bell(c);
-    c->air_x   = sky->speed * t_cos(sky->toward) + c->gust_x;
-    c->air_y   = sky->speed * t_sin(sky->toward) + c->gust_y;
+    /* 2. the air: the shared steady wind plus this drone's own gust
+     * (craft_sky() worked out the parts every drone shares) */
+    c->gust_x += -c->gust_x * (dt / GUST_LIFE) + sky->gust_kick * bell(c);
+    c->gust_y += -c->gust_y * (dt / GUST_LIFE) + sky->gust_kick * bell(c);
+    c->air_x   = sky->steady_x + c->gust_x;
+    c->air_y   = sky->steady_y + c->gust_y;
 
     /* 3. forces.  In the body: forward = along the nose, side = to the right. */
-    float cb = t_cos(c->bank), sb = t_sin(c->bank);
-    float cn = t_cos(c->nose), sn = t_sin(c->nose);
-    float ch = t_cos(c->heading), sh = t_sin(c->heading);
+    float cb, sb, cn, sn, ch, sh;
+    t_sincos(c->bank, &sb, &cb);
+    t_sincos(c->nose, &sn, &cn);
+    t_sincos(c->heading, &sh, &ch);
     float fwd  = c->lift * sn * cb;
     float side = c->lift * sb;
     float up   = c->lift * cn * cb;
@@ -122,8 +159,9 @@ void craft_step(craft_t *c, const sky_t *sky, const cmd_t *cmd, float dt)
     }
     c->acc = a;
 
-    /* 6. the battery: momentum theory says power ~ thrust^1.5 */
-    float load = c->lift / G0;
+    /* 6. the battery: momentum theory says power ~ thrust^1.5
+     * (times 1/g, not divided by g: a division costs 3 multiplies) */
+    float load = c->lift * (1.0f / G0);
     c->charge -= DRAIN * load * t_sqrt(load) * dt;
     if (c->charge < 0.0f) { c->charge = 0.0f; }
 
@@ -146,7 +184,7 @@ void craft_sense(craft_t *c, meas_t *m)
     c->trail_x[c->trail_at] = c->pos.x;
     c->trail_y[c->trail_at] = c->pos.y;
     c->trail_at = (uint8_t)((c->trail_at + 1u) % (FIX_LAG + 1u));
-    float kick = c->gps.wander * t_sqrt(2.0f * dt / WANDER_LIFE);
+    float kick = c->gps.wander * wander_root;
     c->drift_x += -c->drift_x * (dt / WANDER_LIFE) + kick * bell(c);
     c->drift_y += -c->drift_y * (dt / WANDER_LIFE) + kick * bell(c);
 

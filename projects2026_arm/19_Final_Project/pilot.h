@@ -62,9 +62,14 @@ typedef struct {
     float  charge;
     cmd_t  last;                       /* the last command, for telemetry     */
     pilot_tune_t k;
+    /* ---- worked out from k by pilot_init(), not every step: a tan costs
+     * this chip ~1100 cycles.  Change k?  Call pilot_retune() after. --- */
+    float  reach;                      /* m/s^2, g tan(tilt)                  */
+    float  cap, cap_z;                 /* the integrators' anti-windup limits */
 } pilot_t;
 
 void        pilot_init(pilot_t *p);
+void        pilot_retune(pilot_t *p);                 /* after changing p->k  */
 int         pilot_arm(pilot_t *p);                    /* IDLE -> FOLLOW       */
 int         pilot_land(pilot_t *p);                   /* -> LAND, then IDLE   */
 void        pilot_goal(pilot_t *p, v3_t at, v3_t vel);

@@ -39,7 +39,7 @@ int fleet_init(int n, uint32_t seed)
     count = n;
     ticks = 0;
     seed_used = seed;
-    sky = (sky_t){ 0.0f, 0.0f };
+    craft_sky(&sky, 0.0f, 0.0f);
     grade = GPS_PLAIN;
     for (int i = 0; i < n; i++) {
         craft_init(&fleet[i].body, mix(seed, (uint32_t)i), 0.0f, 0.0f);
@@ -61,8 +61,7 @@ void fleet_place(int i, float x, float y)
 
 void fleet_wind(float speed, float toward)
 {
-    sky.speed  = speed < 0.0f ? 0.0f : speed;
-    sky.toward = toward;
+    craft_sky(&sky, speed < 0.0f ? 0.0f : speed, toward);
 }
 
 void fleet_gps(float wander, float jitter)
@@ -92,7 +91,7 @@ void fleet_step(void)
         }
     }
     for (int i = 0; i < count; i++) {
-        craft_step(&fleet[i].body, &sky, &fleet[i].asked, AIR_DT);
+        craft_step(&fleet[i].body, &sky, &fleet[i].asked);
     }
     ticks++;
 }

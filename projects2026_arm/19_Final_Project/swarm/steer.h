@@ -1,0 +1,64 @@
+/*
+ * steer.h - how one drone moves among others: a few local rules
+ *
+ * No drone is told where to fly around the others.  Each one works out its
+ * own velocity, 20 times a second, from where it wants to go and from what
+ * its neighbours' beacons say - nothing else.  The group's shape is not
+ * written anywhere: it EMERGES from these rules (Reynolds, "Flocks, herds
+ * and schools", 1987, plus a collision-avoidance rule on top):
+ *
+ *   separation   closer than STEER_SEP to a neighbour: push away, with the
+ *                square of how close - gentle at first, then very hard
+ *   avoidance    LOOK AHEAD: from both velocities, where will the two of
+ *                us be closest in the next 3 s?  If closer than STEER_AVOID,
+ *                move so that point opens up.  Head-on, both turn RIGHT -
+ *                the same rule on both drones makes them pass, not dance.
+ *                A drone with a conflict ahead also BRAKES: its goal speed
+ *                shrinks with how close the predicted pass is
+ *   goal         toward where I want to be, slowing as I arrive.  A goal
+ *                the whole flock shares (GOTO) stops pulling STEER_SLACK
+ *                short of it - otherwise every drone presses to the same
+ *                point and only separation holds them apart
+ *   cohesion     toward my neighbours' centre       (flocking only)
+ *   alignment    toward my neighbours' mean velocity (flocking only)
+ *
+ * SAFETY FIRST: separation and avoidance get the speed budget first, and
+ * the goal only what is left of STEER_VMAX - a drone in a crowd slows down
+ * rather than push through.
+ *
+ * A neighbour's position is its last beacon moved on by its velocity for
+ * the beacon's age: a beacon is up to 200 ms old, and at 3 m/s that is 0.6 m.
+ *
+ * Pure C, no hardware: host/ compiles it too.
+ */
+#ifndef STEER_H
+#define STEER_H
+
+#include <stdint.h>
+#include "nbr.h"
+
+#define STEER_VMAX   3.0f      /* m/s                                           */
+#define STEER_SEP    2.8f      /* m: separation starts (under the 3 m between pads,
+                                  so drones can land side by side)               */
+#define STEER_AVOID  3.0f      /* m: a predicted pass closer than this is avoided */
+#define STEER_SLACK  3.0f      /* m: a SHARED goal (GOTO) only pulls from further out */
+#define STEER_HORIZ  3.0f      /* s: how far ahead it looks                     */
+
+typedef struct {
+    v3_t  me, vel;             /* my estimate                                   */
+    int   has_goal;
+    v3_t  goal;
+    float k_coh, k_ali;        /* 0 unless flocking                             */
+    float slack;               /* m: the goal pulls only from beyond this       */
+    float vmax;                /* <= STEER_VMAX                                  */
+} steer_in_t;
+
+typedef struct {
+    v3_t  v;                   /* the velocity to fly, m/s (z = 0)              */
+    float closest;             /* m, to the nearest neighbour now (99: none)    */
+    uint8_t avoiding;          /* a predicted conflict shaped v                 */
+} steer_out_t;
+
+void steer(const steer_in_t *in, const nbrs_t *nb, uint32_t now_ms, steer_out_t *out);
+
+#endif

@@ -18,7 +18,7 @@ settle time, closest approach, PASS or FAIL. The station draws it all in 3D.
 ## Run it
 
 ```
-build.bat                  # FLASH 32 496 B / 32 KB (99.2 %), RAM 10 608 B / 12 KB, zero warnings
+build.bat                  # FLASH 29 868 B / 32 KB (91.2 %), RAM 10 696 B / 12 KB, zero warnings
 ```
 
 Then in VS Code: F1, **Wokwi: Select Config File**, `wokwi.toml`; F1,
@@ -28,13 +28,15 @@ Then in VS Code: F1, **Wokwi: Select Config File**, `wokwi.toml`; F1,
 run.bat                    # the station, on the swarm view
 ```
 
-Click the picture and press `a`. **In Wokwi the show runs in slow motion.**
-Five drones are more work than Wokwi emulates in real time, so the firmware
-lets its show clock fall behind instead of skipping work (see "Three tasks"
+Click the picture and press `a`. The show plays at **twice real time** (the
+125 s show in about a minute); `speed 1` in the command box is real time,
+`speed 5` faster still. **In Wokwi it may not reach the speed asked.** If
+five drones are more work than Wokwi emulates that fast, the firmware lets
+its show clock fall behind instead of skipping work (see "Three tasks"
 below). `stats` says how fast it is running.
 
 ```
-host\test.bat              # the same show on the PC: 31 + 21 checks, exit code 0
+host\test.bat              # the same show on the PC: 32 + 21 checks, exit code 0
 ```
 
 ## How it works
@@ -96,7 +98,7 @@ The plan is small: the drones' positions at each formation, 13 × 5 × 12 B.
 | `fly` | 1 | 10 ms | `director_tick()`: the fleet, the score, the frames |
 
 `fly` is the **lowest** priority on purpose. In Wokwi a tick of five drones
-takes longer than 10 ms, so `fly` never sleeps. A higher-priority task that
+can take longer than 10 ms, and then `fly` never sleeps. A higher-priority task that
 never sleeps starves everything below it; that is how lesson 13 froze. At
 the bottom it uses only the time the others leave: the show slows down and
 the controls keep working. On silicon `fly` sleeps until each 10 ms is due.
@@ -128,7 +130,8 @@ and the view would never see them.
 | `craft.c`, `craft.h` | one drone's airframe, its air and sensors. `sky_t` is the steady wind every drone shares, gusts are per drone, `gps_grade_t` selects RTK or plain GPS |
 | `contract.h` | what an airframe and its pilot exchange: `meas_t` in, `cmd_t` out |
 | `fmt.c`, `fmt.h` | a small `snprintf`: integers and strings, 2 KB less than newlib's |
-| `trig.c`, `trig.h` | `fmath.h`'s sin/cos/sqrt/atan2, compiled once |
+| `trig.c`, `trig.h` | sin and cos in one call, an integer square root, atan2, wrap: compiled once |
+| `softfloat.c` | float `+ - * /` and compares in Thumb assembly, replacing libgcc's: the same answers bit for bit, twice as fast, 2.8 KB smaller |
 | `Main.c` | the hardware half: three tasks, the shell, the keys, LD4 |
 | `build.bat` | `LIBS=retarget os uart proto adc pad` |
 | `wokwi.toml`, `diagram.json` | the app board, unchanged; serial port forwarded to TCP 4000 for the station |
@@ -156,16 +159,56 @@ RAM for 12 KB. What it took:
 | `fmt.c` instead of `vsnprintf` (and the `malloc` it drags in) | ~2 KB |
 | **no OLED**: `oled`, `i2c`, the picture and the station mirror | ~4 KB |
 | sin/cos/sqrt compiled once (`trig.c`) | ~0.7 KB |
+| `softfloat.c` instead of libgcc's float routines (see "Made fast") | ~2.8 KB |
 | RAM: 5 drones not 6, a sensor reading not kept per drone, repair heights as bytes, a 12-step (not 16) estimator history | ~1.5 KB of RAM |
 
 **The OLED stays dark.** It was the largest single cut and the least
 missed: the station draws the show far better than 128 × 64 pixels could.
 LD4 blinks instead, slowly on the pads and fast in flight. The headroom left
-is about 270 B of flash. Editing `show.c`'s table costs none; new code does.
+is about 2.9 KB of flash. Editing `show.c`'s table costs none; new code does.
 
 Task stacks were sized from `-fstack-usage` along the deepest call chains,
 not measured running. `fly`'s worst is about 990 B of its 1408 B. `stats`
 prints each task's real high-water mark: check it the first time it runs.
+
+## Made fast
+
+The first version flew one 10 ms tick of five drones in 8.4 ms of chip time
+on average and 12.8 ms at worst - over budget even on silicon - and planned
+the show in 1.3 s. Now:
+
+| | before | now |
+|---|---|---|
+| one flying tick, mean | 403 600 cycles (8.4 ms) | 112 800 cycles (2.4 ms) |
+| one flying tick, worst | 616 700 cycles (12.8 ms) | 178 100 cycles (3.7 ms) |
+| planning the show at power-up | 63.5 M cycles (1.3 s) | 15.6 M cycles (0.33 s) |
+| flash | 32 496 B | 29 868 B |
+
+Cycles at 48 MHz, counted in an instruction-set simulator of the Cortex-M0+
+running the firmware's own `plan.c` ... `craft.c` (not `Main.c`: no RTOS, no
+UART). **Measure first:** 87 % of the time was inside libgcc's soft-float
+routines, so that is where the work went.
+
+| what | why it pays |
+|---|---|
+| `softfloat.c`: `+ - * /` and compares in Thumb assembly | libgcc's are generic C: 137 cycles a multiply, 433 a divide. These give the same bits for 67 and 188 |
+| `t_sqrt()` in whole-number arithmetic | three Newton steps were three float divisions: 2 050 cycles. Now 330, and correctly rounded |
+| `t_sincos()`: both from one call, minimax polynomials on -pi/4..pi/4 | the airframe wants the sin and cos of three angles every tick: 12 multiplies a pair became 7, and the error fell from 3.7e-6 to 1.2e-6 |
+| `bell()` sums its four dice as integers | 16 float operations became 2, for the same number bit for bit |
+| constants worked out once: the wind's sin and cos (`craft_sky()`), the pilot's tilt limit (`pilot_retune()`), `dt / tau` by the compiler | they were recomputed for every drone on every tick |
+| squared distances first (`beyond()`) | "is this pair the closest yet?" rarely needs the square root |
+| `plan_sample_all()`, and `frame()` formatting in place | the move's speed profile was worked out once per drone; every telemetry line was copied twice |
+
+Most of this changes no result. With `softfloat.c`, the integer `bell()`,
+the constants worked out once and the squared distances, every line the
+board sends over a whole show was the same, byte for byte, as the first
+version's. `t_sqrt()` and `t_sincos()` are more exact than what they
+replace, so with them numbers moved in the fourth digit (track RMS 0.1976 m
+then, 0.1968 m now; still PASS, closest pass 3.65 m). One change can be
+seen: moving from the heart to the cross, two slots are exactly as good as
+each other for drones 0 and 2 - every drone of the heart is in one plane -
+so which takes which was decided by rounding noise. It still is, the noise
+changed, and the two swap.
 
 ## Rewritten from lesson 14, not copied
 
@@ -210,10 +253,10 @@ toward 30°, RTK GPS, seed 1. 2026-11-17. The Python version
 
 ## Status
 
-- **Built:** zero warnings, FLASH 32 496 B, RAM 10 608 B. All host checks pass.
+- **Built:** zero warnings, FLASH 29 868 B, RAM 10 696 B. All host checks pass.
 - **Power-up is the slow part in Wokwi.** Checking every pair through the
-  whole show is millions of soft-float operations: about a second on a real
-  chip, many times that in Wokwi, which runs float-heavy code at least 6x
+  whole show is millions of soft-float operations: a third of a second on a
+  real chip, many times that in Wokwi, which runs float-heavy code at least 6x
   slower (lesson 13 measured it). The first version also checked the whole
   show twice, every 0.1 s, and said nothing while it did, so the station
   showed a black screen for what could be most of a minute. Now: one pass,

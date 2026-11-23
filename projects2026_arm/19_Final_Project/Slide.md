@@ -457,7 +457,7 @@ into a column across it needs 9, and its closest planned pass is then
 | `ui` | 2 | buttons, knob, LD4, every 20 ms |
 | `fly` | **1** | `director_tick()` |
 
-In Wokwi one tick of five drones takes **longer than 10 ms**, so `fly`
+In Wokwi one tick of five drones can take **longer than 10 ms**, and then `fly`
 never sleeps. Lesson 13 froze because a high-priority task that never sleeps
 starves everything below it. At the **bottom**, `fly` gets only the time the
 others leave: the show goes into **slow motion**, and the buttons and the
@@ -480,8 +480,9 @@ The first build: **43 192 B of flash for a 32 KB chip.**
 | `fmt.c`, a small `snprintf` for integers and strings | ~2 KB |
 | **no OLED**: driver, I²C, picture, station mirror | ~4 KB |
 | sin/cos/sqrt compiled once (`trig.c`) | ~0.7 KB |
+| `softfloat.c` instead of libgcc's float routines - and twice as fast | ~2.8 KB |
 
-Now **32 496 B (99.2 %)**, RAM 10 608 B of 12 KB. The OLED stays dark, and
+Now **29 868 B (91.2 %)**, RAM 10 696 B of 12 KB. The OLED stays dark, and
 LD4 blinks instead. The lesson: on a small chip, one library call can cost
 more than your whole algorithm. **Read the map file.**
 
@@ -526,8 +527,8 @@ wind, seed 1.
 
 | | |
 |---|---|
-| builds, zero warnings, fits | yes: 32 496 B flash, 10 608 B RAM |
-| plan, flight, score, frames | yes, on the host: the same C, 31 checks; the Python version, 21 |
+| builds, zero warnings, fits | yes: 29 868 B flash, 10 696 B RAM |
+| plan, flight, score, frames | yes, on the host: the same C, 32 checks; the Python version, 21 |
 | the station view | rendered off-screen from a capture of the firmware's frames |
 | **running in Wokwi** | **not yet watched** |
 | task stacks | estimated with `-fstack-usage`, not measured; `stats` prints the real high-water marks |

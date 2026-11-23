@@ -1,6 +1,12 @@
 /*
  * director.h - runs the show: one clock, the plan, the score, the frames
  *
+ * THE ONE-CHIP VERSION, kept on the PC as the reference.  The firmware used
+ * to fly all five drones inside one chip with this director; now every drone
+ * has a chip of its own (../drone.c) and host/conductor.py is the ground
+ * station.  test_show.c still flies this version, and test_drones.c checks
+ * that five separate drones fly exactly the same tracks it does.
+ *
  * The light show's ground station, inside the chip.  Every tick (10 ms of
  * show time) it:
  *     - every 100 ms tells each drone "be here, moving like this" - the plan
@@ -17,7 +23,8 @@
  *   FLYING    the show; LANDING once the drones were told to land
  *   DONE      everyone down, the score sent; START flies it again
  *
- * Frames (lesson 08's $BODY*CS), 10 per second of show time:
+ * Frames (lesson 08's $BODY*CS), 10 per second of show time - or every
+ * `stride`-th of them, when the show is played faster than real time:
  *   $SWM,t_ms,n,stage,stages,name,kind,show_ms,wind_cms,wind_deg,rtk,ff,state
  *                                                       where the show is, its settings
  *   $DRN,i,mode,x,y,z,px,py,pz,sx,sy,sz,bat,ax,ay       cm: truth, plan now, slot;
@@ -34,6 +41,7 @@
 
 #include <stdint.h>
 #include "plan.h"
+#include "fleet.h"
 
 enum { DR_REFUSED, DR_WARMUP, DR_READY, DR_FLYING, DR_LANDING, DR_DONE, DR_COUNT };
 
@@ -50,6 +58,10 @@ typedef struct {
     plan_t   plan;
     emit_fn  emit;
     uint8_t  state, paused, aborted, landing_sent, feedforward, rtk, start_pending, quiet;
+    uint8_t  stride;                 /* telemetry: every stride-th report is sent.  1 =
+                                        all of them; whoever plays the show at N x real
+                                        time sets N, and the station still gets 10 a
+                                        REAL second (director.c, report_part)            */
     uint32_t seed;
     float    wind, wind_deg;
     uint32_t ticks;                  /* since arming: show time = ticks x 10 ms     */

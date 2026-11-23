@@ -18,8 +18,8 @@
  *   fly     1    10 ms    director_tick(): the fleet, the score, the frames
  *
  * fly is the LOWEST priority on purpose.  In Wokwi a tick of five drones
- * takes longer than 10 ms, so fly never sleeps - and a higher-priority task
- * that never sleeps starves everything below it (lesson 13 froze exactly so).
+ * can take longer than 10 ms, and then fly never sleeps - and a higher-priority
+ * task that never sleeps starves everything below it (lesson 13 froze exactly so).
  * At the bottom it can only use the time the others leave: the show goes into
  * slow motion, and the buttons, LD4 and the shell keep working.  On
  * silicon fly sleeps until each 10 ms is due, and the show runs in real time.
@@ -39,6 +39,8 @@
  *     keys.c (1.4 KB) - this lesson only needs key PRESSES;
  *   - fmt.c instead of vsnprintf() (2 KB less), and sin/cos/sqrt compiled
  *     once (trig.c);
+ *   - softfloat.c instead of libgcc's float + - * / (2.8 KB less, and each
+ *     operation in half the cycles - README.md, "Made fast");
  *   - NO OLED.  The display, its I2C driver, the picture and the station's
  *     copy of it were 4 KB, and the station draws the show far better.  The
  *     app board's OLED stays dark; LD4 (PA5) blinks to show the chip is alive:
@@ -63,7 +65,12 @@ STACK(stk_link, 288);
 
 static director_t dir;
 static os_mutex_t dir_lock, print_lock;
-static volatile uint8_t  speed = 1;             /* x real time; 0 = flat out */
+/* The show plays at TWICE real time unless told otherwise (`speed 1`): two
+ * minutes of show in one.  x2 is the fastest a real board keeps up with - a
+ * tick costs it 2.4 ms, 3.7 at worst, of the 5 ms it then has.  If the chip
+ * (or Wokwi) cannot keep the pace asked, the show simply runs as fast as it
+ * can: fly never skips work, the clock falls behind instead. */
+static volatile uint8_t  speed = 2;             /* x real time; 0 = flat out */
 static volatile uint32_t dropped, pace_pct;      /* frames skipped (link busy); show speed % */
 
 /* ============================================================================
@@ -125,6 +132,13 @@ static uint32_t cycles(stamp_t a, stamp_t b)
 
 static volatile uint32_t tick_last, tick_max, tick_sum, tick_n, fly_ticks;
 
+/* Wind from the keys and the knob is POSTED here, not applied under dir_lock:
+ * that lock is held for a whole fleet tick, and a press must not wait for it.
+ * fly applies it at the top of its next tick (and while resting: <= 20 ms). */
+static volatile float   wind_post;
+static volatile uint8_t wind_new;
+static void post_wind(float ms) { wind_post = ms; wind_new = 1u; }
+
 /* ============================================================================
  *  fly - the show, one 10 ms tick at a time
  * ============================================================================ */
@@ -135,6 +149,13 @@ static void task_fly(void *arg)
     for (;;) {
         stamp_t a = stamp();
         os_mutex_lock(&dir_lock);
+        if (wind_new) { wind_new = 0u; director_set_wind(&dir, wind_post, dir.wind_deg); }
+        /* Telemetry follows REAL time: with the show measured at N x real time
+         * (pace_pct, by ui, every second) every N-th report is sent, so the
+         * station gets its ten pictures a second at any speed and the UART is
+         * never asked for more than it carries. */
+        uint32_t pace = pace_pct;
+        dir.stride = (uint8_t)(pace < 150u ? 1u : pace >= 950u ? 10u : (pace + 50u) / 100u);
         int moved = director_tick(&dir);
         os_mutex_unlock(&dir_lock);
         if (!moved) {                                    /* nothing to fly: rest */
@@ -291,11 +312,11 @@ static void station_key(const char *line)
     char c = body[4];
     if (!fresh_press(c, body[6] == '1', os_ticks())) { return; }
     if (c == '?') { help(); return; }
+    if (c >= '1' && c <= '5') { post_wind((float)((c - '1') * 2 + 1)); return; }
     os_mutex_lock(&dir_lock);
     if (c == 'a')                  { if (dir.paused) { director_go(&dir); } else { director_start(&dir); } }
     else if (c == 'b' || c == 'p') { director_abort(&dir); }
     else if (c == 's')             { if (dir.paused) { director_go(&dir); } else { director_pause(&dir); } }
-    else if (c >= '1' && c <= '5') { director_set_wind(&dir, (float)((c - '1') * 2 + 1), dir.wind_deg); }
     os_mutex_unlock(&dir_lock);
 }
 
@@ -340,19 +361,16 @@ static void task_ui(void *arg)
         pad_t p;
         pad_read(&p);
 
+        if (p.adc_ok) {                                     /* knob: no lock needed */
+            if (knob_ref < 0) { knob_ref = p.knob; }
+            else if (abs(p.knob - knob_ref) > 12) { knob_ref = p.knob; post_wind((float)p.knob * 0.01f); }
+        }
         os_mutex_lock(&dir_lock);
         if (p.pressed & PAD_A) { if (dir.paused) { director_go(&dir); } else { director_start(&dir); } }
         if (p.pressed & PAD_B) { director_abort(&dir); }
         if (p.pressed & PAD_SEL) { if (dir.paused) { director_go(&dir); } else { director_pause(&dir); } }
-        /* the knob is the wind, 0..10 m/s - but only once it is MOVED, so the
-         * show's own wind holds until someone touches it */
-        if (p.adc_ok) {
-            if (knob_ref < 0) { knob_ref = p.knob; }
-            else if (abs(p.knob - knob_ref) > 40) {
-                knob_ref = p.knob;
-                director_set_wind(&dir, (float)p.knob * 0.01f, dir.wind_deg);
-            }
-        }
+        /* (the knob, above, is the wind, 0..10 m/s - but only once it is MOVED,
+         * so the show's own wind holds until someone touches it) */
         int flying = dir.state == DR_FLYING || dir.state == DR_LANDING;
         os_mutex_unlock(&dir_lock);
 

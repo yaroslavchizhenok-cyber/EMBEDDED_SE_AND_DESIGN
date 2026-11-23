@@ -218,6 +218,18 @@ static void test_fly(void)
     director_reset(&d);
     fly(&d, 400000);
     CHECK(d.rms == rms1 && d.closest == close1, "flown again, seed 1: identical (%.4f m, %.4f m)", d.rms, d.closest);
+
+    /* played fast, Main.c thins the reports (director.c, report_part) */
+    memset(&out, 0, sizeof out);
+    director_reset(&d);
+    d.stride = 5;
+    long fast = fly(&d, 400000);
+    d.stride = 1;
+    every = 1;
+    for (int i = 0; i < SHOW.drones; i++) { if (out.drn[i] < out.swm - 2) { every = 0; } }
+    CHECK(d.rms == rms1 && every && out.bad == 0 && out.swm >= fast / 50 - 1 && out.swm <= fast / 50 + 2,
+          "every 5th report (x5 speed): %d $SWM in %ld ticks, a $DRN for every drone with each; the flight identical",
+          out.swm, fast);
     director_set_seed(&d, 2);
     fly(&d, 400000);
     CHECK(d.passed && d.rms != rms1, "seed 2: different gusts, different numbers (%.4f m), PASS", d.rms);

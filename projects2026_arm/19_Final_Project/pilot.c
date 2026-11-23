@@ -41,6 +41,16 @@ void pilot_init(pilot_t *p)
     };
     p->mode = PM_IDLE;  p->why = PW_START;
     p->charge = 100.0f;
+    pilot_retune(p);
+}
+
+void pilot_retune(pilot_t *p)
+{
+    float sn, cs;
+    t_sincos(p->k.tilt, &sn, &cs);
+    p->reach = G0 * sn / cs;                                /* g tan(tilt)     */
+    p->cap   = 0.8f * p->reach / p->k.k_int;                /* anti-windup     */
+    p->cap_z = 3.0f / p->k.k_climb_int;
 }
 
 int pilot_arm(pilot_t *p)
@@ -189,14 +199,13 @@ void pilot_step(pilot_t *p, const meas_t *m, cmd_t *out)
     /* steer: velocity PI.  In a steady wind the integral ends up holding the
      * tilt INTO the wind - read k_int * sum and you read the wind. */
     v3_t want = aim(p);
-    float reach = G0 * t_sin(p->k.tilt) / t_cos(p->k.tilt);   /* g tan(tilt)  */
+    float reach = p->reach;                                    /* g tan(tilt)  */
     v3_t gap = { want.x - p->est_v.x, want.y - p->est_v.y, want.z - p->est_v.z };
     if (p->est.z > 0.5f) {
-        float cap = 0.8f * reach / p->k.k_int;                 /* anti-windup  */
-        p->sum.x = limit(p->sum.x + gap.x * dt, cap);
-        p->sum.y = limit(p->sum.y + gap.y * dt, cap);
+        p->sum.x = limit(p->sum.x + gap.x * dt, p->cap);       /* anti-windup  */
+        p->sum.y = limit(p->sum.y + gap.y * dt, p->cap);
     }
-    p->sum.z = limit(p->sum.z + gap.z * dt, 3.0f / p->k.k_climb_int);
+    p->sum.z = limit(p->sum.z + gap.z * dt, p->cap_z);
 
     float ax = p->k.k_vel * gap.x + p->k.k_int * p->sum.x;
     float ay = p->k.k_vel * gap.y + p->k.k_int * p->sum.y;
@@ -206,7 +215,8 @@ void pilot_step(pilot_t *p, const meas_t *m, cmd_t *out)
 
     /* the thrust vector must point along (ax, ay, g + az): split it into the
      * body's forward and right, then into angles */
-    float ch = t_cos(p->heading), sh = t_sin(p->heading);
+    float ch, sh;
+    t_sincos(p->heading, &sh, &ch);
     float fwd  = ax * ch + ay * sh;
     float side = ax * sh - ay * ch;
     float up   = G0 + az;

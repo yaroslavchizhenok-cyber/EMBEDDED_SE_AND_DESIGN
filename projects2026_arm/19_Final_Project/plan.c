@@ -13,11 +13,18 @@
 #define HOLD_HOME   1.0f
 #define HOLD_LAND   8.0f         /* s the plan allows for landing              */
 
-static float dist(v3_t a, v3_t b)
+static float dist2(v3_t a, v3_t b)                     /* squared: no root */
 {
     float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-    return t_sqrt(dx * dx + dy * dy + dz * dz);
+    return dx * dx + dy * dy + dz * dz;
 }
+
+static float dist(v3_t a, v3_t b) { return t_sqrt(dist2(a, b)); }
+
+/* A squared distance above this is surely farther than d - no square root
+ * needed to know.  The margin covers t_sqrt()'s rounding (1e-7) many times
+ * over, so a pair it skips could never have been the closer one. */
+static float beyond(float d) { return d * d * 1.00002f; }
 
 /* metres as "2.35" - fmt.c prints no floats */
 static const char *metres(char *buf, float m)          /* buf: 16 bytes */
@@ -53,8 +60,9 @@ static void shape_v(int n, float s, float *u, float *w)
 static void shape_circle(int n, float s, float *u, float *w)
 {
     for (int k = 0; k < n; k++) {
-        float a = F_PI_2 + F_2PI * (float)k / (float)n;
-        u[k] = (s / 2) * t_cos(a);  w[k] = (s / 2) * t_sin(a);
+        float a = F_PI_2 + F_2PI * (float)k / (float)n, sn, cs;
+        t_sincos(a, &sn, &cs);
+        u[k] = (s / 2) * cs;  w[k] = (s / 2) * sn;
     }
 }
 
@@ -92,9 +100,17 @@ static void shape_grid(int n, float s, float *u, float *w)
  * symmetric layout (notch left empty) is used when it costs little spacing. */
 static void heart_at(float t, float *x, float *y)
 {
-    float s = t_sin(t);
+    /* x = 16 sin^3 t,  y = 13 cos t - 5 cos 2t - 2 cos 3t - cos 4t.
+     * One sin and one cos; the multiple angles follow from them
+     * (cos 2t = 2 cos^2 t - 1, and so on) for a few multiplies each.
+     * The curve is walked ~2000 times at power-up: it adds up. */
+    float s, c;
+    t_sincos(t, &s, &c);
+    float c2 = 2.0f * c * c - 1.0f;                /* cos 2t */
+    float c3 = c * (2.0f * c2 - 1.0f);             /* cos 3t */
+    float c4 = 2.0f * c2 * c2 - 1.0f;              /* cos 4t */
     *x = 16.0f * s * s * s;
-    *y = 13.0f * t_cos(t) - 5.0f * t_cos(2 * t) - 2.0f * t_cos(3 * t) - t_cos(4 * t);
+    *y = 13.0f * c - 5.0f * c2 - 2.0f * c3 - c4;
 }
 
 #define HEART_STEPS 240
@@ -137,7 +153,7 @@ static float min_gap(int n, const float *u, const float *w)
 
 static void shape_heart(int n, float s, float *u, float *w)
 {
-    float a[FLEET_MAX], b[FLEET_MAX];
+    float a[SHOW_MAX_DRONES], b[SHOW_MAX_DRONES];
     heart_at(F_PI, &u[0], &w[0]);                                /* the tip   */
     if (n > 1) {
         int left = (n - 2) / 2, right = n - 2 - left;
@@ -175,7 +191,7 @@ void plan_shape(const form_t *f, int n, v3_t *out)
         for (int i = 0; i < n; i++) { out[i] = f->points ? f->points[i] : (v3_t){ 0 }; }
         return;
     }
-    float u[FLEET_MAX], w[FLEET_MAX];
+    float u[SHOW_MAX_DRONES], w[SHOW_MAX_DRONES];
     switch (f->shape) {
     case SH_V:      shape_v(n, f->size, u, w);      break;
     case SH_CIRCLE: shape_circle(n, f->size, u, w); break;
@@ -184,7 +200,8 @@ void plan_shape(const form_t *f, int n, v3_t *out)
     case SH_HEART:  shape_heart(n, f->size, u, w);  break;
     default:        shape_line(n, f->size, u, w);   break;
     }
-    float t = f->turn * (F_PI / 180.0f), c = t_cos(t), s = t_sin(t);
+    float c, s;
+    t_sincos(f->turn * (F_PI / 180.0f), &s, &c);
     for (int i = 0; i < n; i++) {
         if (f->plane == WALL) {          /* standing up, facing south */
             out[i] = (v3_t){ f->x + u[i] * c, f->y + u[i] * s, f->z + w[i] };
@@ -203,10 +220,10 @@ void plan_shape(const form_t *f, int n, v3_t *out)
  * reduced costs.  Index 0 is a sentinel, so arrays run 0..n.               */
 void plan_assign(const v3_t *from, const v3_t *to, int n, uint8_t *who)
 {
-    float cost[FLEET_MAX][FLEET_MAX];
-    float u[FLEET_MAX + 1] = { 0 }, v[FLEET_MAX + 1] = { 0 }, best[FLEET_MAX + 1];
-    int owner[FLEET_MAX + 1] = { 0 }, way[FLEET_MAX + 1] = { 0 };
-    uint8_t used[FLEET_MAX + 1];
+    float cost[SHOW_MAX_DRONES][SHOW_MAX_DRONES];
+    float u[SHOW_MAX_DRONES + 1] = { 0 }, v[SHOW_MAX_DRONES + 1] = { 0 }, best[SHOW_MAX_DRONES + 1];
+    int owner[SHOW_MAX_DRONES + 1] = { 0 }, way[SHOW_MAX_DRONES + 1] = { 0 };
+    uint8_t used[SHOW_MAX_DRONES + 1];
 
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
@@ -324,34 +341,55 @@ static void retime(plan_t *p, stage_t *s)
     s->T = s->prof.T;
 }
 
-void plan_sample(const plan_t *p, const stage_t *s, int i, float t, v3_t *pos, v3_t *vel)
+/* does anything move in this stage?  On the pads, in a hold, landing: no. */
+static int moving(const stage_t *s) { return s->kind == ST_TAKEOFF || s->kind == ST_MOVE; }
+
+/* drone i, `frac` of the way along its path, covering `rate` paths a second */
+static void along(const plan_t *p, const stage_t *s, int i, float frac, float rate, v3_t *pos, v3_t *vel)
 {
     v3_t pt[4];
     int m = path(p, s, i, pt);
     *vel = (v3_t){ 0 };
-    if (m == 1 || s->kind == ST_HOLD || s->kind == ST_HOME || s->kind == ST_PADS || s->kind == ST_LAND) {
-        *pos = pt[m - 1];
-        return;
-    }
-    float frac, rate;
-    profile_at(&s->prof, t - s->t0, &frac, &rate);
-    float total = path_len(pt, m), d = frac * total, speed = rate * total;
+    if (m == 1) { *pos = pt[0];  return; }
+    float len[3], total = 0.0f;                      /* each leg measured once */
+    for (int k = 0; k + 1 < m; k++) { len[k] = dist(pt[k], pt[k + 1]);  total += len[k]; }
+    float d = frac * total, speed = rate * total;
     for (int k = 0; k + 1 < m; k++) {
-        float L = dist(pt[k], pt[k + 1]);
+        float L = len[k];
         if (d <= L || k + 2 == m) {
             if (L < 1e-6f) { *pos = pt[k + 1];  return; }
-            float f = d / L > 1.0f ? 1.0f : d / L;
-            *pos = (v3_t){ pt[k].x + (pt[k + 1].x - pt[k].x) * f,
-                           pt[k].y + (pt[k + 1].y - pt[k].y) * f,
-                           pt[k].z + (pt[k + 1].z - pt[k].z) * f };
-            *vel = (v3_t){ (pt[k + 1].x - pt[k].x) / L * speed,
-                           (pt[k + 1].y - pt[k].y) / L * speed,
-                           (pt[k + 1].z - pt[k].z) / L * speed };
+            /* two divisions, then only multiplies: a division costs three */
+            float f = d / L, v = speed / L;
+            if (f > 1.0f) { f = 1.0f; }
+            v3_t leg = { pt[k + 1].x - pt[k].x, pt[k + 1].y - pt[k].y, pt[k + 1].z - pt[k].z };
+            *pos = (v3_t){ pt[k].x + leg.x * f, pt[k].y + leg.y * f, pt[k].z + leg.z * f };
+            *vel = (v3_t){ leg.x * v, leg.y * v, leg.z * v };
             return;
         }
         d -= L;
     }
     *pos = pt[m - 1];
+}
+
+void plan_sample(const plan_t *p, const stage_t *s, int i, float t, v3_t *pos, v3_t *vel)
+{
+    if (!moving(s)) { *pos = p->spot[s->to][i];  *vel = (v3_t){ 0 };  return; }
+    float frac, rate;
+    profile_at(&s->prof, t - s->t0, &frac, &rate);
+    along(p, s, i, frac, rate, pos, vel);
+}
+
+/* Every drone at once.  They all fly the SAME speed profile, so how far
+ * along the move is at time t is worked out once, not once per drone. */
+void plan_sample_all(const plan_t *p, const stage_t *s, float t, v3_t *pos, v3_t *vel)
+{
+    float frac = 0.0f, rate = 0.0f;
+    int go = moving(s);
+    if (go) { profile_at(&s->prof, t - s->t0, &frac, &rate); }
+    for (int i = 0; i < p->n; i++) {
+        if (go) { along(p, s, i, frac, rate, &pos[i], &vel[i]); }
+        else    { pos[i] = p->spot[s->to][i];  vel[i] = (v3_t){ 0 }; }
+    }
 }
 
 v3_t plan_stage_end(const plan_t *p, const stage_t *s, int i) { return p->spot[s->to][i]; }
@@ -364,8 +402,8 @@ float plan_duration(const plan_t *p)
 
 const stage_t *plan_stage(const plan_t *p, float t, int *index)
 {
-    int k = 0;
-    while (k + 1 < p->n_stages && t >= p->st[k].t0 + p->st[k].T) { k++; }
+    int k = 0;                         /* a stage ends where the next begins */
+    while (k + 1 < p->n_stages && t >= p->st[k + 1].t0) { k++; }
     if (index) { *index = k; }
     return &p->st[k];
 }
@@ -399,17 +437,21 @@ typedef struct { int bad; float d, t; uint8_t i, j; } check_t;
 static check_t check(const plan_t *p, const stage_t *s, float sep, uint8_t *close /* n*n or 0 */)
 {
     check_t c = { 0, 1e9f, 0.0f, 0, 0 };
-    float least[FLEET_MAX * FLEET_MAX];
+    float least[SHOW_MAX_DRONES * SHOW_MAX_DRONES], bound[SHOW_MAX_DRONES * SHOW_MAX_DRONES];
     int n = p->n, steps = (int)(s->T / PLAN_DT_CHECK) + 1;
-    for (int k = 0; k < n * n; k++) { least[k] = 1e9f; }
+    for (int k = 0; k < n * n; k++) { least[k] = 1e9f;  bound[k] = beyond(1e9f); }
     for (int k = 0; k <= steps; k++) {
         float t = s->t0 + (k < steps ? (float)k * PLAN_DT_CHECK : s->T);
-        v3_t at[FLEET_MAX], v;
-        for (int i = 0; i < n; i++) { plan_sample(p, s, i, t, &at[i], &v); }
+        v3_t at[SHOW_MAX_DRONES], v[SHOW_MAX_DRONES];
+        plan_sample_all(p, s, t, at, v);
         for (int i = 0; i < n; i++) {
             for (int j = i + 1; j < n; j++) {
-                float d = dist(at[i], at[j]);
-                if (d < least[i * n + j]) { least[i * n + j] = d; }
+                /* most pairs, most moments, are no closer than they have been:
+                 * the squared distance says so without a square root */
+                float q = dist2(at[i], at[j]);
+                if (q > bound[i * n + j]) { continue; }
+                float d = t_sqrt(q);
+                if (d < least[i * n + j]) { least[i * n + j] = d;  bound[i * n + j] = beyond(d); }
                 if (d < c.d) { c.d = d;  c.t = t;  c.i = (uint8_t)i;  c.j = (uint8_t)j; }
             }
         }
@@ -446,7 +488,7 @@ static int repair(plan_t *p, stage_t *s, check_t *last)
                 if ((a.z < b.z ? a.z : b.z) + h < MIN_ALT) { continue; }
                 p->lift[s->from][who] = (int8_t)(h * 10.0f + (h > 0.0f ? 0.5f : -0.5f));
                 retime(p, s);
-                uint8_t close[FLEET_MAX * FLEET_MAX];
+                uint8_t close[SHOW_MAX_DRONES * SHOW_MAX_DRONES];
                 check_t after = check(p, s, sep, close);
                 float score[4] = { (float)close[c.i * p->n + c.j], (float)after.bad, f_abs(h), s->T };
                 int better = best_who < 0;
@@ -496,8 +538,8 @@ int plan_build(plan_t *p, const show_t *sh, plan_progress_fn progress)
     p->show = sh;
     p->n = sh->drones;
     int n = p->n;
-    if (n < 1 || n > FLEET_MAX) {
-        fmt(p->why, sizeof p->why, "drones: 1 .. %d on this build", FLEET_MAX);
+    if (n < 1 || n > SHOW_MAX_DRONES) {
+        fmt(p->why, sizeof p->why, "drones: 1 .. %d on this build", SHOW_MAX_DRONES);
         return -1;
     }
     if (sh->n_forms > SHOW_MAX_FORMS) {
@@ -521,7 +563,7 @@ int plan_build(plan_t *p, const show_t *sh, plan_progress_fn progress)
 
     int here = 1;
     for (int f = 0; f <= sh->n_forms; f++) {
-        v3_t goal[FLEET_MAX];
+        v3_t goal[SHOW_MAX_DRONES];
         int home = f == sh->n_forms;
         const char *name = home ? "home" : sh->forms[f].name;
         if (home) { memcpy(goal, p->spot[1], sizeof goal); }
@@ -543,7 +585,7 @@ int plan_build(plan_t *p, const show_t *sh, plan_progress_fn progress)
                 if (d < tight) { tight = d; }
             }
         }
-        uint8_t who[FLEET_MAX];
+        uint8_t who[SHOW_MAX_DRONES];
         plan_assign(p->spot[here], goal, n, who);
         for (int i = 0; i < n; i++) { p->spot[here + 1][i] = goal[who[i]]; }
 

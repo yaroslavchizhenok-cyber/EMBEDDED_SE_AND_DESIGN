@@ -35,7 +35,7 @@
 #include <stdint.h>
 #include "contract.h"
 #include "show.h"
-#include "fleet.h"
+
 
 #define PLAN_SPOTS   (SHOW_MAX_FORMS + 3)            /* pads, up, forms, home    */
 #define PLAN_STAGES  (2 * (SHOW_MAX_FORMS + 1) + 3)  /* pads, takeoff, ..., land */
@@ -56,8 +56,8 @@ typedef struct {
 typedef struct {
     const show_t *show;
     uint8_t  n, n_stages, n_spots, repairs;
-    v3_t     spot[PLAN_SPOTS][FLEET_MAX];    /* where each drone is at each spot  */
-    int8_t   lift[PLAN_SPOTS][FLEET_MAX];    /* move spot k -> k+1: fly over (+)
+    v3_t     spot[PLAN_SPOTS][SHOW_MAX_DRONES];    /* where each drone is at each spot  */
+    int8_t   lift[PLAN_SPOTS][SHOW_MAX_DRONES];    /* move spot k -> k+1: fly over (+)
                                                 or under (-) by this many DECIMETRES,
                                                 0 = straight (a byte, not a float:
                                                 RAM is the scarce thing here)      */
@@ -75,6 +75,7 @@ int            plan_build(plan_t *p, const show_t *s, plan_progress_fn progress)
 float          plan_duration(const plan_t *p);
 const stage_t *plan_stage(const plan_t *p, float t, int *index);
 void           plan_sample(const plan_t *p, const stage_t *s, int i, float t, v3_t *pos, v3_t *vel);
+void           plan_sample_all(const plan_t *p, const stage_t *s, float t, v3_t *pos, v3_t *vel);   /* [n] */
 v3_t           plan_stage_end(const plan_t *p, const stage_t *s, int i);
 const char    *plan_stage_name(const plan_t *p, const stage_t *s);   /* "heart", "pads" */
 const char    *plan_kind_name(uint8_t kind);                         /* "move", "hold"  */

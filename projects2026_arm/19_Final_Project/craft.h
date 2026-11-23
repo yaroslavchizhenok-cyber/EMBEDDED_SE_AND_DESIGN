@@ -27,6 +27,10 @@
 typedef struct {
     float speed;                     /* m/s, the steady part                  */
     float toward;                    /* rad, the direction it blows TOWARD    */
+    /* worked out ONCE by craft_sky() - every drone needs them every tick,
+     * and a sin with its cos costs this chip ~900 cycles                    */
+    float steady_x, steady_y;        /* m/s, the steady wind as a vector      */
+    float gust_kick;                 /* how hard the gusts are kicked a tick  */
 } sky_t;
 
 /* How good the GPS receivers are.  Plain GPS wanders by tens of cm and
@@ -62,8 +66,9 @@ typedef struct {
     uint32_t dice;                     /* random state                         */
 } craft_t;
 
+void craft_sky(sky_t *sky, float speed, float toward);   /* set the wind      */
 void craft_init(craft_t *c, uint32_t seed, float x, float y);
-void craft_step(craft_t *c, const sky_t *sky, const cmd_t *cmd, float dt);
-void craft_sense(craft_t *c, meas_t *m);
+void craft_step(craft_t *c, const sky_t *sky, const cmd_t *cmd);   /* AIR_DT  */
+void craft_sense(craft_t *c, meas_t *m);                           /* PILOT_DT */
 
 #endif
