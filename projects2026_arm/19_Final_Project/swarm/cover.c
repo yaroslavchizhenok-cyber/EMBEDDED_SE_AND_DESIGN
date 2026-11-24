@@ -3,6 +3,7 @@
  */
 #include <string.h>
 #include "cover.h"
+#include "../trig.h"
 
 void cover_init(cover_t *c, float x0, float y0, float x1, float y1)
 {
@@ -56,6 +57,9 @@ int cover_done(const cover_t *c) { return c->nx && cover_count(c) == cover_cells
 
 v3_t cover_centre(const cover_t *c, int cell, float z)
 {
+    /* no cells, or none chosen: the area's corner.  (Never divide by nx = 0:
+     * the PC crashes, and the M0 quietly returns 0 - a junk goal.) */
+    if (!c->nx || cell < 0) { return (v3_t){ c->x0, c->y0, z }; }
     int i = cell % c->nx, j = cell / c->nx;
     return (v3_t){ c->x0 + ((float)i + 0.5f) * c->cw, c->y0 + ((float)j + 0.5f) * c->ch, z };
 }
@@ -93,9 +97,14 @@ int cover_choose(cover_t *c, uint8_t self, v3_t me, const nbrs_t *nb, uint8_t ma
         float mine = d2(m.x, m.y, me.x, me.y);
         if (cell == c->target) { mine *= 0.8f; }         /* keep what I chose: no dithering */
         int taken = 0;
-        for (unsigned k = 0; k < nb->n && !taken; k++) {
+        for (unsigned k = 0; k < nb->n; k++) {
             const nbr_t *o = &nb->e[k];
-            if (o->type != mapper_type || o->mode != 2u) { continue; }
+            if (o->mode != 2u) { continue; }
+            /* a drone already by the cell's centre: that cell counts as 5 m
+             * further away - in a crowd, mappers spread out rather than
+             * squeeze in beside each other */
+            if (d2(m.x, m.y, o->pos.x, o->pos.y) < 9.0f) { mine += 25.0f + 10.0f * t_sqrt(mine); }
+            if (o->type != mapper_type) { continue; }
             if (cover_cell_at(c, (float)o->gx * 0.1f, (float)o->gy * 0.1f) != cell) { continue; }
             float theirs = d2(m.x, m.y, o->pos.x, o->pos.y);
             if (theirs < mine || (theirs == mine && o->id < self)) { taken = 1; }

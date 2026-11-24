@@ -13,7 +13,7 @@
 #define EXP_EVERY_MS    100u
 #define STEER_EVERY_MS  50u       /* the local rules, 20 times a second        */
 #define THINK_EVERY_MS  250u      /* the job: what to do, where to go          */
-#define GOSSIP_MS       1000u     /* $TSK and $MAP                             */
+#define GOSSIP_MS       1000u     /* $MAP                                      */
 #define MSN_EVERY_MS    2000u     /* the mission, relayed again                */
 #define HOP_EVERY_MS    500u
 #define GND_FRESH_MS    3000u
@@ -25,7 +25,7 @@
 #define SPOT_LIMIT      200.0f
 
 static const char *const state_text[AG_COUNT] = { "NO-ID", "GROUND", "FLYING", "LANDING", "HOMING", "DEAD" };
-static const char *const type_text[TY_COUNT]  = { "mapper", "sensor", "relay" };
+static const char *const type_text[TY_COUNT]  = { "mapper", "mapper", "relay" };
 static const char *const kind_text[MS_COUNT]  = { "HOLD", "GOTO", "SURVEY", "HOME" };
 static const char WHY_DONE[] = "mission complete", WHY_ORDER[] = "ordered home",
                   WHY_BAT[]  = "battery low",      WHY_LOST[]  = "lost link",
@@ -78,7 +78,6 @@ static uint32_t roll(agent_t *a)
     return a->dice = x;
 }
 
-static void tasks_news(agent_t *a);
 
 static float flat(v3_t p, v3_t q) { float dx = p.x - q.x, dy = p.y - q.y; return t_sqrt(dx * dx + dy * dy); }
 
@@ -96,11 +95,10 @@ void agent_init(agent_t *a, uint8_t id, uint8_t type, emit_fn emit)
     memset(a, 0, sizeof *a);
     a->emit = emit;
     a->id = id;
-    a->type = type < TY_COUNT ? type : TY_MAPPER;
+    a->type = type == TY_RELAY ? TY_RELAY : TY_MAPPER;   /* straps 0 or 1: a mapper */
     a->hop = HOP_NONE;
     a->closest = 99.0f;
     nbr_init(&a->nb);
-    tasks_reset(&a->tk, 0, 0);
     if (id < 1u || id > RADIO_MAX_ID) {
         a->state = AG_NOID;
         say(a, "no drone ID: strap PB0/PA7/PA15 to GND for bits 0/1/2 (diagram.json)\n");
@@ -117,7 +115,6 @@ void agent_init(agent_t *a, uint8_t id, uint8_t type, emit_fn emit)
     /* every schedule starts at this drone's own random moment: drones switched
      * on together must not all talk at once, for ever */
     a->next_bcn   = roll(a) % BCN_EVERY_MS;
-    a->next_tsk   = roll(a) % GOSSIP_MS;
     a->next_map   = roll(a) % GOSSIP_MS;
     a->next_msn   = roll(a) % MSN_EVERY_MS;
     a->next_think = roll(a) % THINK_EVERY_MS;
@@ -131,9 +128,6 @@ void agent_init(agent_t *a, uint8_t id, uint8_t type, emit_fn emit)
 static void go_home(agent_t *a, const char *why)
 {
     if (a->state != AG_FLYING) { return; }
-    tasks_release(&a->tk, a->id, a->now_ms);
-    tasks_news(a);
-    a->at_task_ms = 0;
     a->state = AG_HOMING;
     a->why = why;
     say(a, "going home: %s\n", why);
@@ -176,7 +170,6 @@ void agent_takeoff(agent_t *a)
 void agent_land(agent_t *a)
 {
     if (a->state != AG_FLYING && a->state != AG_HOMING) { return; }
-    tasks_release(&a->tk, a->id, a->now_ms);
     pilot_land(&a->brain);
     a->state = AG_LANDING;
     a->parked = 1;
@@ -202,29 +195,23 @@ void agent_breeze(agent_t *a, float ms)
 /* ---- the mission -------------------------------------------------------------- */
 int msn_encode(const mission_t *m, char *buf, int size)
 {
-    int n = fmt(buf, (size_t)size, "MSN,%u,%u,%ld,%ld,%ld,%ld,%ld,%ld,%u", (unsigned)m->mid, (unsigned)m->kind,
-                (long)dm(m->gx), (long)dm(m->gy), (long)dm(m->x0), (long)dm(m->y0), (long)dm(m->x1),
-                (long)dm(m->y1), (unsigned)m->np);
-    for (unsigned i = 0; i < m->np && n < size - 16; i++) {
-        n += fmt(buf + n, (size_t)(size - n), ",%ld,%ld", (long)dm(m->pt[2 * i]), (long)dm(m->pt[2 * i + 1]));
-    }
-    return n;
+    return fmt(buf, (size_t)size, "MSN,%u,%u,%ld,%ld,%ld,%ld,%ld,%ld", (unsigned)m->mid, (unsigned)m->kind,
+               (long)dm(m->gx), (long)dm(m->gy), (long)dm(m->x0), (long)dm(m->y0), (long)dm(m->x1), (long)dm(m->y1));
 }
 
 int msn_decode(const char *line, mission_t *m)
 {
-    int32_t f[9 + 2 * MSN_POINTS];
-    int n = frame_ints(line, "MSN", f, 9 + 2 * MSN_POINTS);
-    if (n < 9 || f[0] < 0 || f[0] > 65535 || f[1] < 0 || f[1] >= MS_COUNT ||
-        f[8] < 0 || f[8] > (int32_t)MSN_POINTS || n != 9 + 2 * f[8]) {
-        return -1;
+    int32_t f[8];
+    int n = frame_ints(line, "MSN", f, 8);
+    if (n != 8 || f[0] < 0 || f[0] > 65535 || f[1] < 0 || f[1] >= MS_COUNT) { return -1; }
+    if (f[1] == MS_SURVEY && ((f[6] - f[4] < 5 && f[4] - f[6] < 5) || (f[7] - f[5] < 5 && f[5] - f[7] < 5))) {
+        return -1;                                       /* a survey of no area: refused */
     }
     memset(m, 0, sizeof *m);
-    m->mid = (uint16_t)f[0];  m->kind = (uint8_t)f[1];  m->np = (uint8_t)f[8];
+    m->mid = (uint16_t)f[0];  m->kind = (uint8_t)f[1];
     m->gx = (float)f[2] * 0.1f;  m->gy = (float)f[3] * 0.1f;
     m->x0 = (float)f[4] * 0.1f;  m->y0 = (float)f[5] * 0.1f;
     m->x1 = (float)f[6] * 0.1f;  m->y1 = (float)f[7] * 0.1f;
-    for (int i = 0; i < 2 * m->np; i++) { m->pt[i] = (float)f[9 + i] * 0.1f; }
     return 0;
 }
 
@@ -244,15 +231,9 @@ static void adopt(agent_t *a, const mission_t *m)
         a->edge = 0.0f;                                  /* a new job: learn its edge anew */
         a->probe_ms = 4000u;
     }
-    a->at_task_ms = 0;
     a->route_trips = 0;
-    if (m->kind == MS_SURVEY) {
-        cover_init(&a->cv, m->x0, m->y0, m->x1, m->y1);
-        tasks_reset(&a->tk, m->np, m->pt);
-    } else {
-        cover_init(&a->cv, 0, 0, 0, 0);
-        tasks_reset(&a->tk, 0, 0);
-    }
+    if (m->kind == MS_SURVEY) { cover_init(&a->cv, m->x0, m->y0, m->x1, m->y1); }
+    else                      { cover_init(&a->cv, 0, 0, 0, 0); }
     /* relay it soon - but not at the same moment as every other drone that
      * heard the same copy */
     a->next_msn = a->now_ms + 20u + roll(a) % 120u;
@@ -313,27 +294,6 @@ static v3_t relay_spot(agent_t *a)
     return (v3_t){ g.x + (cx - g.x) * f, g.y + (cy - g.y) * f, HOVER_Z };
 }
 
-/* A fingerprint of my copy of the auction: winners, bids, done flags. */
-static uint32_t tasks_print(const tasks_t *k)
-{
-    uint32_t h = 2166136261u;
-    for (unsigned i = 0; i < k->n; i++) {
-        h = (h ^ k->t[i].winner) * 16777619u;
-        h = (h ^ k->t[i].bid) * 16777619u;
-        h = (h ^ k->t[i].done) * 16777619u;
-    }
-    return h;
-}
-
-/* My copy changed: tell the neighbours now, not at my next turn - news of a
- * claim or a finished task then crosses the swarm in tenths of a second per
- * hop, not a second per hop, and two drones rarely do the same job. */
-static void tasks_news(agent_t *a)
-{
-    uint32_t soon = a->now_ms + 40u + roll(a) % 120u;
-    if ((int32_t)(a->next_tsk - soon) > 0) { a->next_tsk = soon; }
-}
-
 /* Is the column above my pad clear?  No airborne neighbour within CLEAR_R
  * sideways - a drone going up or down cannot dodge (the pilot flies a
  * landing straight down), so it waits until the others have passed. */
@@ -344,6 +304,19 @@ static int clear(const agent_t *a)
         if (o->pos.z > 0.8f && flat(o->pos, a->brain.est) < CLEAR_R) { return 0; }
     }
     return 1;
+}
+
+/* How close may I get to (x, y), given the obstacles I know?  0: as close
+ * as I like; else the point is in or by an obstacle, and this is how near
+ * the steering will let me come: its radius, OBS_SEP and half a metre. */
+static float blocked(const agent_t *a, float x, float y)
+{
+    for (unsigned i = 0; i < a->nobs; i++) {
+        const obst_t *o = &a->obs[i];
+        float r = (float)o->r * 0.1f, dx = (float)o->x * 0.1f - x, dy = (float)o->y * 0.1f - y;
+        if (dx * dx + dy * dy < (r + OBS_SEP) * (r + OBS_SEP)) { return t_sqrt(dx * dx + dy * dy) + r + OBS_SEP + 0.5f; }
+    }
+    return 0.0f;
 }
 
 /* GOTO: go to the goal - but stay where the ground radio's word still
@@ -410,15 +383,12 @@ static v3_t goto_spot(agent_t *a)
     return g;
 }
 
-/* Is my part of the mission done, as far as I know?  A mapper's part is the
- * map; a sensor's the tasks; a relay stays until both are, so the others
- * keep their link home until the end. */
+/* Is my part of the mission done, as far as I know?  For every drone, the
+ * survey map: a relay stays up until it is full, so the mappers keep their
+ * link home until the end. */
 static int my_part_done(const agent_t *a)
 {
-    if (a->m.kind != MS_SURVEY) { return 0; }
-    if (a->type == TY_MAPPER) { return cover_done(&a->cv); }
-    if (a->type == TY_SENSOR) { return tasks_all_done(&a->tk); }
-    return cover_done(&a->cv) && tasks_all_done(&a->tk);
+    return a->m.kind == MS_SURVEY && cover_done(&a->cv);
 }
 
 /* ---- deciding: 4 times a second -------------------------------------------- */
@@ -429,7 +399,9 @@ static void think(agent_t *a)
     v3_t e = a->brain.est;
     int working = a->has_m && (a->m.kind == MS_GOTO || a->m.kind == MS_SURVEY);
 
-    if (a->has_m && a->tk.n) { tasks_expire(&a->tk, a->id, now); }
+    for (unsigned i = 0; i < a->nobs;) {                   /* out of sight: forgotten */
+        if (now - a->obs[i].seen_ms > OBS_KEEP_MS) { a->obs[i] = a->obs[--a->nobs]; } else { i++; }
+    }
 
     if (a->state == AG_GROUND) {
         if (working && my_part_done(a) && !a->done_m) {   /* the gossip says it is over */
@@ -494,41 +466,15 @@ static void think(agent_t *a)
     }
     if (a->m.kind == MS_GOTO) { a->goal = goto_spot(a);  return; }
 
-    /* SURVEY */
-    if (a->type == TY_MAPPER) {
-        if (my_part_done(a)) { complete(a);  return; }
-        int cell = cover_choose(&a->cv, a->id, e, &a->nb, TY_MAPPER);
-        a->goal = cover_centre(&a->cv, cell, HOVER_Z);
-        return;
-    }
-    /* SENSOR */
-    uint32_t before = tasks_print(&a->tk);
-    int k = tasks_bid(&a->tk, a->id, e, bat, now);
-    if (tasks_print(&a->tk) != before) { tasks_news(a); }
-    if (k < 0) {
-        if (my_part_done(a)) { complete(a);  return; }
-        /* nothing for me: wait WHERE I AM - not on the point I just lost,
-         * where I would stand in the winner's way */
-        if (a->tasking) { a->hold = (v3_t){ e.x, e.y, a->cruise };  a->tasking = 0; }
-        a->goal = a->hold;
-        a->at_task_ms = 0;
-        return;
-    }
-    a->tasking = 1;
-    const task_t *t = &a->tk.t[k];
-    a->goal = (v3_t){ t->x, t->y, HOVER_Z };
-    if (flat(e, a->goal) < TASK_AT_M) {
-        if (!a->at_task_ms) { a->at_task_ms = now | 1u; }
-        else if (now - a->at_task_ms >= TASK_HOLD_MS) {
-            tasks_finish(&a->tk, k);
-            tasks_news(a);
-            a->sensed++;
-            a->at_task_ms = 0;
-            say(a, "task %d done: reading %u\n", k + 1, (unsigned)(180u + roll(a) % 60u));
-        }
-    } else {
-        a->at_task_ms = 0;
-    }
+    /* SURVEY: every drone but a relay maps */
+    if (!a->cv.nx) { a->goal = a->hold;  return; }        /* no cells (cannot happen: refused) */
+    if (my_part_done(a)) { complete(a);  return; }
+    int cell = cover_choose(&a->cv, a->id, e, &a->nb, TY_MAPPER);
+    a->goal = cover_centre(&a->cv, cell, HOVER_Z);
+    /* a cell with an obstacle in it cannot be flown over: the camera sees it
+     * from beside the obstacle, and counts it */
+    float near = blocked(a, a->goal.x, a->goal.y);
+    if (near > 0.0f && flat(e, a->goal) < near + 1.0f) { cover_set(&a->cv, cell);  a->covered++; }
 }
 
 /* ---- moving: 20 times a second -------------------------------------------------- */
@@ -538,6 +484,7 @@ static void move(agent_t *a)
     steer_in_t in = {
         .me = p->est, .vel = p->est_v, .goal = a->goal, .vmax = STEER_VMAX,
         .has_goal = a->has_goal && p->est.z > CLIMB_Z,
+        .obs = a->obs, .nobs = a->nobs,
     };
     if (a->state == AG_FLYING && a->has_m && a->m.kind == MS_GOTO && a->type != TY_RELAY && !a->falling_back) {
         in.k_coh = 0.12f;  in.k_ali = 0.3f;                /* a flock, not a queue */
@@ -600,19 +547,6 @@ static void beacon(agent_t *a)
     a->tx++;
 }
 
-static void gossip_tasks(agent_t *a)
-{
-    tasks_refresh(&a->tk, a->id, a->brain.est, a->body.charge, a->now_ms);
-    char body[RADIO_LINE];
-    int n = fmt(body, sizeof body, "TSK,%u,%u,%u", (unsigned)a->id, (unsigned)a->m.mid, (unsigned)a->tk.n);
-    for (unsigned i = 0; i < a->tk.n; i++) {
-        const task_t *t = &a->tk.t[i];
-        n += fmt(body + n, sizeof body - (size_t)n, ",%u,%u,%u,%u,%u", (unsigned)t->winner, (unsigned)t->bid,
-                 (unsigned)t->stamp, (unsigned)tasks_age_ds(t, a->now_ms), (unsigned)t->done);
-    }
-    frame(a, 1, "%s", body);
-}
-
 static void gossip_map(agent_t *a)
 {
     frame(a, 1, "MAP,%u,%u,%lu,%lu,%lu,%lu", (unsigned)a->id, (unsigned)a->m.mid,
@@ -630,10 +564,14 @@ static void table(agent_t *a)
     frame(a, 0, "%s", body);
 }
 
+/* $PHY is telemetry, skipped when the transmit ring is busy - the radio goes
+ * first.  But one in five (one a second) is sent whatever: on a busy chip the
+ * world (the air) and the screen must still learn where the drone is, or the
+ * station loses it and its icon blinks out. */
 static void physics(agent_t *a)
 {
     const craft_t *c = &a->body;
-    frame(a, 0, "PHY,%u,%ld,%ld,%ld,%ld,%ld,%ld,%u,%u", (unsigned)a->id,
+    frame(a, a->now_ms % 1000u < PHY_EVERY_MS, "PHY,%u,%ld,%ld,%ld,%ld,%ld,%ld,%u,%u", (unsigned)a->id,
           (long)cm(c->pos.x), (long)cm(c->pos.y), (long)cm(c->pos.z),
           (long)cm(c->vel.x), (long)cm(c->vel.y), (long)cm(c->vel.z), (unsigned)a->state, (unsigned)a->type);
 }
@@ -669,7 +607,6 @@ void agent_tick(agent_t *a)
 
     if (a->state == AG_FLYING || a->state == AG_HOMING) {
         if (a->brain.mode == PM_LAND) {                    /* the pilot's own guard: battery empty */
-            tasks_release(&a->tk, a->id, now);
             a->state = AG_LANDING;
             say(a, "landing NOW: battery empty\n");
         } else {
@@ -713,7 +650,6 @@ void agent_tick(agent_t *a)
         a->relayed++;
         a->next_msn = now + MSN_EVERY_MS - 100u + roll(a) % 200u;
     }
-    if (a->has_m && a->tk.n && due(now, &a->next_tsk, GOSSIP_MS)) { gossip_tasks(a); }
     if (a->has_m && a->cv.nx && due(now, &a->next_map, GOSSIP_MS)) { gossip_map(a); }
     if (due(now, &a->next_exp, EXP_EVERY_MS)) {
         uint8_t gone[NBR_MAX];
@@ -749,24 +685,6 @@ static void heard(agent_t *a, const char *line)
         say(a, "+nbr %u (%s): %s m away (%u in table)\n", (unsigned)b.id, agent_type_name(b.type),
             metres(m, t_sqrt(dx * dx + dy * dy + dz * dz)), (unsigned)a->nb.n);
     }
-}
-
-static void heard_tasks(agent_t *a, const char *line)
-{
-    int32_t f[3 + 5 * TASK_MAX];
-    int n = frame_ints(line, "TSK", f, 3 + 5 * (int)TASK_MAX);
-    if (n < 3) { a->rx_bad++; return; }
-    a->heard_ms = a->now_ms;
-    if (!a->has_m || f[1] != a->m.mid || f[2] != a->tk.n || n != 3 + 5 * f[2]) { return; }
-    uint32_t before = tasks_print(&a->tk);
-    for (int i = 0; i < f[2]; i++) {
-        const int32_t *e = &f[3 + 5 * i];
-        if (e[0] < 0 || e[0] > (int32_t)RADIO_MAX_ID || e[1] < 0 || e[1] > 65535 || e[2] < 0 || e[2] > 65535 ||
-            e[3] < 0 || e[3] > 65535) { continue; }
-        tasks_merge(&a->tk, a->id, i, (uint8_t)e[0], (uint16_t)e[1], (uint16_t)e[2], (uint16_t)e[3],
-                    e[4] != 0, a->now_ms);
-    }
-    if (tasks_print(&a->tk) != before) { tasks_news(a); }
 }
 
 static void heard_map(agent_t *a, const char *line)
@@ -819,7 +737,6 @@ int agent_line(agent_t *a, const char *line)
     if (a->state == AG_NOID || a->state == AG_DEAD) { return 1; }   /* a dead radio hears nothing */
     if      (strncmp(line, "$BCN,", 5) == 0) { heard(a, line); }
     else if (strncmp(line, "$MSN,", 5) == 0) { heard_mission(a, line); }
-    else if (strncmp(line, "$TSK,", 5) == 0) { heard_tasks(a, line); }
     else if (strncmp(line, "$MAP,", 5) == 0) { heard_map(a, line); }
     else if (strncmp(line, "$GND,", 5) == 0) {
         int32_t f[3];
@@ -837,6 +754,29 @@ int agent_line(agent_t *a, const char *line)
         else { a->rx_bad++; }
     }
     else if (strncmp(line, "$KEY,", 5) == 0) { key(a, line); }
+    else if (strncmp(line, "$OBS,", 5) == 0) {            /* the rangefinder sees one */
+        int32_t f[4];
+        if (frame_ints(line, "OBS", f, 4) != 4 || f[0] < 0 || f[0] > 255 || f[3] < 1 || f[3] > 255 ||
+            f[1] < -32000 || f[1] > 32000 || f[2] < -32000 || f[2] > 32000) { a->rx_bad++;  return 1; }
+        unsigned i = 0;
+        while (i < a->nobs && a->obs[i].id != (uint8_t)f[0]) { i++; }
+        if (i == a->nobs) {
+            if (a->nobs < OBS_MAX) { a->nobs++; }
+            else {                                         /* full: forget the stalest */
+                i = 0;
+                for (unsigned k = 1; k < OBS_MAX; k++) { if (a->obs[k].seen_ms < a->obs[i].seen_ms) { i = k; } }
+            }
+        }
+        a->obs[i] = (obst_t){ .x = (int16_t)f[1], .y = (int16_t)f[2], .id = (uint8_t)f[0], .r = (uint8_t)f[3],
+                              .seen_ms = a->now_ms };
+    }
+    else if (strncmp(line, "$HIT,", 5) == 0) {            /* the world says: I hit it */
+        int32_t f[1];
+        if (frame_ints(line, "HIT", f, 1) == 1 && f[0] == a->id) {
+            say(a, "CRASHED into an obstacle\n");
+            agent_kill(a);
+        }
+    }
     return 1;                                             /* any other $: ignored */
 }
 
@@ -862,7 +802,7 @@ void agent_print_nbrs(agent_t *a)
 
 static void print_mission(agent_t *a)
 {
-    char b1[16], b2[16];
+    char b1[16];
     if (!a->has_m) { say(a, "no mission heard\n"); return; }
     say(a, "mission %u %s%s; battery %u %%; closest neighbour seen %s m; avoids %lu\n", (unsigned)a->m.mid,
         kind_text[a->m.kind], a->done_m ? " (done here)" : "", (unsigned)a->body.charge,
@@ -874,11 +814,6 @@ static void print_mission(agent_t *a)
     if (a->parked) { say(a, "  parked: landed by hand, staying down until told\n"); }
     if (a->cv.nx) {
         say(a, "  map: %d of %d cells covered (%u by me)\n", cover_count(&a->cv), cover_cells(&a->cv), (unsigned)a->covered);
-    }
-    for (unsigned i = 0; i < a->tk.n; i++) {
-        const task_t *t = &a->tk.t[i];
-        say(a, "  task %u at %s,%s: %s winner %u bid %u\n", i + 1, metres(b1, t->x), metres(b2, t->y),
-            t->done ? "DONE" : "open", (unsigned)t->winner, (unsigned)t->bid);
     }
 }
 

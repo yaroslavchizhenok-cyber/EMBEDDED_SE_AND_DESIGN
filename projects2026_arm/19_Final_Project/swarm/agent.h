@@ -20,21 +20,23 @@
  *                      rising is believed (DSDV: Perkins and Bhagwat, 1994) -
  *                      so a group cut off from home cannot keep a route alive
  *                      by quoting each other's old hop counts
- *   which job          its type (from its straps) and the gossip:
+ *   which job          its type (from its straps):
  *                        MAPPER  covers the survey area cell by cell (cover.h)
- *                        SENSOR  bids for sensing points (tasks.h), holds 5 s
  *                        RELAY   places itself between the ground radio and
  *                                the work, so the swarm stays connected
- *   when to stop       its own battery (low: give up its task, fly home, land,
+ *                      (The straps' type 1 was a SENSOR, for sensing points,
+ *                      until 2026-11-25; there are none now, and a board
+ *                      strapped 1 is a mapper: every drone flies the survey.)
+ *   when to stop       its own battery (low: fly home, land,
  *                      recharge on the pad, come back), a lost link (nobody
  *                      heard for 15 s, or no route to the ground radio for
  *                      60 s: fly back toward home - and turn round to work
  *                      again as soon as it hears the swarm), or its own
- *                      belief that the mission is complete (map full, tasks done)
+ *                      belief that the mission is complete (its map is full)
  *
  * What this chip sends on its UART - every $ frame but $PHY and $NBT is
  * RADIO, carried by the station's air to the drones in range:
- *   $BCN $MSN $TSK $MAP   radio (radio.h)
+ *   $BCN $MSN $MAP        radio (radio.h)
  *   $PHY,id,x,y,z,vx,vy,vz,mode,type   the TRUTH, cm: the simulated world, so
  *                         the air knows who is in range of whom.  Never delivered.
  *   $NBT,id,n,id1,q1,...  what this drone believes (its table): for the screen
@@ -51,7 +53,6 @@
 #include "radio.h"
 #include "nbr.h"
 #include "steer.h"
-#include "tasks.h"
 #include "cover.h"
 
 #define AGENT_TICK_MS  10u        /* agent_tick() every 10 ms                  */
@@ -73,20 +74,19 @@
 #define PROBE_MIN_MS   2000u      /* in touch: try 1 m further out every probe_ms -
                                      2 s at the quickest (following relays out),  */
 #define PROBE_MAX_MS   32000u     /* 32 s at the slowest (a goal truly out of reach) */
-#define MSN_POINTS     TASK_MAX
+#define OBS_KEEP_MS    2000u      /* an obstacle not seen for this long is forgotten */
 
 enum { AG_NOID, AG_GROUND, AG_FLYING, AG_LANDING, AG_HOMING, AG_DEAD, AG_COUNT };
-enum { TY_MAPPER, TY_SENSOR, TY_RELAY, TY_COUNT };
+enum { TY_MAPPER = 0, TY_RELAY = 2, TY_COUNT = 3 };    /* the straps' values; 1 is a mapper too */
 enum { MS_HOLD, MS_GOTO, MS_SURVEY, MS_HOME, MS_COUNT };
 
 typedef void (*emit_fn)(const char *line, int must);
 
 typedef struct {
     uint16_t mid;                 /* newer replaces older (wrapping compare)   */
-    uint8_t  kind, np;
+    uint8_t  kind;
     float    gx, gy;              /* the ground radio, m                       */
     float    x0, y0, x1, y1;      /* GOTO: the point is (x0, y0); SURVEY: the area */
-    float    pt[2 * MSN_POINTS];  /* SURVEY: sensing points                   */
 } mission_t;
 
 typedef struct {
@@ -109,7 +109,7 @@ typedef struct {
     nbrs_t   nb;
     uint16_t seq;
     uint32_t next_bcn, next_phy, next_nbt, next_exp, next_steer, next_think,
-             next_tsk, next_map, next_msn, next_hop;
+             next_map, next_msn, next_hop;
     uint32_t dice;
     uint32_t tx, rx, rx_bad, rx_old, rx_far, rx_clash, relayed;
     uint32_t heard_ms;            /* anything valid heard, last                */
@@ -124,6 +124,8 @@ typedef struct {
     uint32_t cut_ms, edge_ms;     /* since when stale (0: fresh); last edge change */
     uint32_t probe_ms;            /* how long in touch before the next 1 m probe  */
     uint8_t  parked;              /* landed BY HAND: stays down until told        */
+    obst_t   obs[OBS_MAX];        /* obstacles its rangefinder has seen           */
+    uint8_t  nobs;
     uint8_t  falling_back;        /* GOTO: out of reach, flying back into it      */
     uint32_t relay_bad_ms;        /* RELAY: since when its link upstream is bad */
     uint8_t  gnd_seen;
@@ -138,11 +140,8 @@ typedef struct {
     uint16_t finished_mid;
     uint8_t  finished_any;
     uint32_t m_ms;                /* when this mission arrived                 */
-    tasks_t  tk;
     cover_t  cv;
-    uint32_t at_task_ms;          /* arrived at my task point (0: not there)   */
-    uint8_t  tasking;             /* I was flying to a task last time I looked */
-    uint16_t sensed, covered;
+    uint16_t covered;
     const char *why;              /* why it is going home                      */
     /* ---- for the record ---------------------------------------------------- */
     float    closest;             /* m, the nearest neighbour seen while flying */

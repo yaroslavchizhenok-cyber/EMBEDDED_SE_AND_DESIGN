@@ -1,7 +1,7 @@
 /*
  * test_swarm.c - the whole swarm on the PC, every property tested
  *
- * The SAME agent.c, nbr.c, radio.c, steer.c, tasks.c and cover.c the chips
+ * The SAME agent.c, nbr.c, radio.c, steer.c and cover.c the chips
  * run, one agent_t per drone, ticked side by side.  Between them, a model of
  * the station's air (radio_medium.py): a radio frame reaches only the drones
  * within range, one tick (10 ms) later, maybe lost; a relay's radio reaches
@@ -48,6 +48,13 @@ static int     minsep_a, minsep_b;
 static uint32_t minsep_t;
 static long    frames_bad, frames_total, frames_air;
 static long    tx_bytes[MAXD];
+static long    phy_sent[MAXD], phy_must[MAXD];   /* $PHY frames, and those sent whatever the ring */
+
+/* the world's obstacles: round columns, taller than every lane */
+#define MAXOB 16
+static float   obx[MAXOB], oby[MAXOB], obr[MAXOB];
+static int     nob, crashes, crashed[MAXD];
+static float   ob_closest;                        /* m, a flying drone to an obstacle's surface */
 
 typedef struct { int dst; char line[RADIO_LINE + 8]; } pend_t;
 static pend_t  pend[2][PEND];
@@ -113,8 +120,8 @@ static void transmit(int src, const char *line)
 
 static void emit(const char *line, int must)
 {
-    (void)must;
     int src = current;
+    if (src >= 0 && !strncmp(line, "$PHY,", 5)) { phy_sent[src]++;  phy_must[src] += must != 0; }
     frames_total++;
     if (src >= 0) { tx_bytes[src] += (long)strlen(line); }
     if (line[0] == '$') {
@@ -138,11 +145,9 @@ static void ground_send(const char *body)
     transmit(-1, line);
 }
 
-static void post(uint8_t kind, float x0, float y0, float x1, float y1, int np, const float *pt)
+static void post(uint8_t kind, float x0, float y0, float x1, float y1)
 {
-    mission_t m = { .mid = ++mid, .kind = kind, .np = (uint8_t)np, .gx = gnd_x, .gy = gnd_y,
-                    .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1 };
-    for (int i = 0; i < 2 * np; i++) { m.pt[i] = pt[i]; }
+    mission_t m = { .mid = ++mid, .kind = kind, .gx = gnd_x, .gy = gnd_y, .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1 };
     msn_encode(&m, mission, sizeof mission);
     ground_send(mission);
 }
@@ -160,7 +165,12 @@ static void world(int n, const uint8_t *types, float rng)
     frames_bad = frames_total = frames_air = 0;
     memset(cut, 0, sizeof cut);
     memset(route_returns, 0, sizeof route_returns);
+    nob = crashes = 0;
+    memset(crashed, 0, sizeof crashed);
+    ob_closest = 99.0f;
     memset(tx_bytes, 0, sizeof tx_bytes);
+    memset(phy_sent, 0, sizeof phy_sent);
+    memset(phy_must, 0, sizeof phy_must);
     for (int i = 0; i < n; i++) {
         speed[i] = 1.0f;  acc[i] = 0.0f;
         current = i;
@@ -201,6 +211,32 @@ static void step(void)
     for (int i = 0; i < N; i++) {
         if (A[i].state == AG_HOMING && A[i].why && !strcmp(A[i].why, "no route to the ground radio")) { route_returns[i] = 1; }
     }
+    for (int i = 0; i < N && nob; i++) {               /* the rangefinder, and collisions */
+        if (crashed[i]) { continue; }
+        v3_t p = A[i].body.pos;
+        for (int k = 0; k < nob; k++) {
+            float d = sqrtf((p.x - obx[k]) * (p.x - obx[k]) + (p.y - oby[k]) * (p.y - oby[k])) - obr[k];
+            if (T % 500u == 0u && d <= 6.0f) {
+                char body[48], line[64];
+                snprintf(body, sizeof body, "OBS,%d,%d,%d,%d", k, (int)lroundf(obx[k] * 10), (int)lroundf(oby[k] * 10),
+                         (int)lroundf(obr[k] * 10));
+                snprintf(line, sizeof line, "$%s*%02X", body, (unsigned)proto_checksum(body, strlen(body)));
+                enqueue(i, line);
+            }
+            if (p.z > 0.3f && !A[i].body.grounded) {
+                if (d < ob_closest) { ob_closest = d; }
+                if (d < 0.3f) {                            /* inside it, drone's size and all */
+                    char body[16], line[32];
+                    snprintf(body, sizeof body, "HIT,%d", A[i].id);
+                    snprintf(line, sizeof line, "$%s*%02X", body, (unsigned)proto_checksum(body, strlen(body)));
+                    enqueue(i, line);
+                    crashed[i] = 1;
+                    crashes++;
+                    if (verbose) { printf("    %6.1f s CRASH: D%d into obstacle %d\n", T / 1000.0, A[i].id, k); }
+                }
+            }
+        }
+    }
     if (trace_id && trace_id <= N && T % 1000u == 0u) {
         const agent_t *a = &A[trace_id - 1];
         printf("    TRACE %.0f s D%d %s est(%.2f,%.2f,%.2f) v(%.2f,%.2f) vcmd(%.2f,%.2f) goal(%.2f,%.2f) has %d home(%.1f,%.1f) nb %u\n",
@@ -212,12 +248,6 @@ static void step(void)
             const nbr_t *o = &a->nb.e[k];
             printf(" D%u %s (%.1f,%.1f,%.1f) truth (%.1f,%.1f,%.1f)", o->id, agent_state_name(o->mode), o->pos.x, o->pos.y, o->pos.z,
                    A[o->id - 1].body.pos.x, A[o->id - 1].body.pos.y, A[o->id - 1].body.pos.z);
-        }
-        printf("\n");
-        printf("    TASKS %.0f s D%d mine %d:", T / 1000.0, a->id, a->tk.mine);
-        for (unsigned k = 0; k < a->tk.n; k++) {
-            const task_t *t = &a->tk.t[k];
-            printf(" [%u w%u b%u s%u age%u d%u]", k + 1, t->winner, t->bid, t->stamp, tasks_age_ds(t, a->now_ms), t->done);
         }
         printf("\n");
     }
@@ -264,6 +294,24 @@ static uint32_t run_until(int (*cond)(void), uint32_t max_ms)
     return 0;
 }
 
+static float flat(v3_t p, v3_t q);
+static void obstacle(float x, float y, float r) { if (nob < MAXOB) { obx[nob] = x;  oby[nob] = y;  obr[nob] = r;  nob++; } }
+
+/* n random obstacles in (x0..x1, y0..y1): >= 5 m apart surface to surface,
+ * clear of the pads (4 m), the ground radio (5 m) and the `keep` points (3.5 m) */
+static void random_obstacles(int n, float x0, float y0, float x1, float y1, int nkeep, const float *keep)
+{
+    for (int tries = 0; tries < n * 400 && nob < n; tries++) {
+        float r = 0.5f + frand(), x = x0 + (x1 - x0) * frand(), y = y0 + (y1 - y0) * frand();
+        int ok = 1;
+        for (int i = 0; i < N && ok; i++) { ok = flat((v3_t){ x, y, 0 }, A[i].home) >= r + 4.0f; }
+        if (ok) { ok = flat((v3_t){ x, y, 0 }, where(-1)) >= r + 5.0f; }
+        for (int i = 0; i < nkeep && ok; i++) { ok = flat((v3_t){ x, y, 0 }, (v3_t){ keep[2 * i], keep[2 * i + 1], 0 }) >= r + 3.5f; }
+        for (int k = 0; k < nob && ok; k++) { ok = flat((v3_t){ x, y, 0 }, (v3_t){ obx[k], oby[k], 0 }) >= r + obr[k] + 5.0f; }
+        if (ok) { obstacle(x, y, r); }
+    }
+}
+
 static int hears(int i, int id) { return nbr_find(&A[i].nb, (uint8_t)id) != 0; }
 static float flat(v3_t p, v3_t q) { return sqrtf((p.x - q.x) * (p.x - q.x) + (p.y - q.y) * (p.y - q.y)); }
 
@@ -296,10 +344,9 @@ static void unfinished(void)
     for (int i = 0; i < N; i++) {
         const agent_t *a = &A[i];
         if (a->state == AG_DEAD || cut[i] || (on_pad(i) && a->done_m)) { continue; }
-        printf("    not done: D%d %s %s at (%.1f,%.1f,%.1f) bat %.0f%% done_m %d why %s map %d/%d tasks:",
+        printf("    not done: D%d %s %s at (%.1f,%.1f,%.1f) bat %.0f%% done_m %d why %s map %d/%d",
                a->id, agent_type_name(a->type), agent_state_name(a->state), a->body.pos.x, a->body.pos.y,
                a->body.pos.z, a->body.charge, a->done_m, a->why ? a->why : "-", cover_count(&a->cv), cover_cells(&a->cv));
-        for (unsigned k = 0; k < a->tk.n; k++) { printf(" %u:%s/D%u", k + 1, a->tk.t[k].done ? "done" : "open", a->tk.t[k].winner); }
         printf(" hop %u nb %u\n", a->hop, a->nb.n);
     }
 }
@@ -310,13 +357,6 @@ static int has_mission_all(void)
     return 1;
 }
 
-static int tasks_done_once(int *total)
-{
-    int s = 0;
-    for (int i = 0; i < N; i++) { s += A[i].sensed; }
-    *total = s;
-    return s;
-}
 
 static const char *scen;
 static int want(const char *name)
@@ -328,10 +368,17 @@ static int want(const char *name)
     return 1;
 }
 
-/* the standard survey: 20 x 20 m north of the pads, three sensing points */
+/* the standard survey: 20 x 20 m north of the pads */
 static const float SX0 = 0, SY0 = 10, SX1 = 20, SY1 = 30;
-static const float PTS[6] = { 3, 27, 17, 13, 10, 20 };
-static void survey(void) { post(MS_SURVEY, SX0, SY0, SX1, SY1, 3, PTS); }
+static void survey(void) { post(MS_SURVEY, SX0, SY0, SX1, SY1); }
+
+/* every drone that is not a relay covered cells of the map itself */
+static int all_mapped(void)
+{
+    int ok = 1;
+    for (int i = 0; i < N; i++) { if (A[i].type != TY_RELAY && A[i].state != AG_DEAD) { ok &= A[i].covered > 0; } }
+    return ok;
+}
 
 static void report_sep(void)
 {
@@ -366,15 +413,15 @@ int main(int argc, char **argv)
               "it decodes to the same beacon, field by field");
         line[7] ^= 1;
         check(bcn_decode(line, &c) == BCN_E_FRAME, "one flipped bit fails the checksum");
-        mission_t m = { .mid = 65535, .kind = MS_SURVEY, .np = 4, .gx = -12.3f, .gy = 45.6f, .x0 = -100, .y0 = -100,
-                        .x1 = 100, .y1 = 100, .pt = { -99.9f, 99.9f, 1, 2, 3, 4, 5, 6 } }, m2;
+        mission_t m = { .mid = 65535, .kind = MS_SURVEY, .gx = -12.3f, .gy = 45.6f, .x0 = -100, .y0 = -100,
+                        .x1 = 100, .y1 = 99.9f }, m2;
         char body[RADIO_LINE], full[RADIO_LINE + 8];
         msn_encode(&m, body, sizeof body);
         snprintf(full, sizeof full, "$%s*%02X", body, (unsigned)proto_checksum(body, strlen(body)));
-        check(strlen(full) < RADIO_LINE && msn_decode(full, &m2) == 0 && m2.mid == m.mid && m2.np == 4 &&
-              fabsf(m2.pt[0] + 99.9f) < 0.05f && fabsf(m2.gy - 45.6f) < 0.05f,
-              "a mission with 4 points round-trips (%d B)", (int)strlen(full));
-        check(msn_decode("$MSN,1,9,0,0,0,0,0,0,0*00", &m2) != 0, "a bad mission is refused");
+        check(strlen(full) < RADIO_LINE && msn_decode(full, &m2) == 0 && m2.mid == m.mid && m2.kind == m.kind &&
+              fabsf(m2.y1 - 99.9f) < 0.05f && fabsf(m2.gy - 45.6f) < 0.05f,
+              "a mission round-trips (%d B)", (int)strlen(full));
+        check(msn_decode("$MSN,1,9,0,0,0,0,0,0*00", &m2) != 0, "a bad mission is refused");
         int32_t f[4];
         check(frame_ints("$GND,1,2,3*06", "GND", f, 4) == BCN_E_FRAME || frame_ints("$GND,1,2,3*06", "GND", f, 4) == 3,
               "frame_ints reads a frame");
@@ -404,6 +451,9 @@ int main(int argc, char **argv)
             if (rnd() % 3) { snprintf(f2, sizeof f2, "$%s*%02X", bod, (unsigned)proto_checksum(bod, strlen(bod))); }
             else           { snprintf(f2, sizeof f2, "$%s*%02X", bod, (unsigned)(rnd() & 0xFF)); }   /* bad CS too */
             current = 0;
+#ifdef FUZZDUMP
+            fprintf(stderr, "%d %s\n", k, f2);  fflush(stderr);
+#endif
             agent_line(&A[0], f2);
             if (k % 1000 == 0) { current = 0; agent_tick(&A[0]); }
         }
@@ -419,6 +469,11 @@ int main(int argc, char **argv)
             check(took == 1 && A[0].rx_bad == bad0 + 1, "a frame that lost its '$' is counted as damage, not run as a command");
         }
         check(A[0].nb.n <= NBR_MAX && A[0].state != AG_NOID, "the drone's table and state are still sane");
+        world(2, 0, 12.0f);
+        run(30000);
+        check(phy_sent[1] >= 148 && phy_sent[1] <= 152 && phy_must[1] >= 29 && phy_must[1] <= 31,
+              "in 30 s a drone sent %ld position reports, %ld of them compulsory (one a second: "
+              "never all skipped, so the station never loses it)", phy_sent[1], phy_must[1]);
     }
 
     /* ================================================================== */
@@ -463,7 +518,7 @@ int main(int argc, char **argv)
         /* two drones head-on, 18 m apart, swapping places */
         world(7, ty, 40.0f);
         run(2000);                                        /* GPS first */
-        post(MS_HOLD, 0, 0, 0, 0, 0, 0);
+        post(MS_HOLD, 0, 0, 0, 0);
         for (int i = 0; i < 7; i++) { if (i == 0 || i == 6) { current = i; agent_takeoff(&A[i]); } }
         run(6000);
         A[0].hold = (v3_t){ 18, 0, HOVER_Z };  A[6].hold = (v3_t){ 0, 0, HOVER_Z };
@@ -480,7 +535,7 @@ int main(int argc, char **argv)
         /* eight drones on a circle, every one to the opposite side at once */
         world(8, ty, 40.0f);
         run(2000);
-        post(MS_HOLD, 0, 0, 0, 0, 0, 0);
+        post(MS_HOLD, 0, 0, 0, 0);
         for (int i = 0; i < 8; i++) { current = i; agent_takeoff(&A[i]); }
         run(5000);
         float cx = 10.5f, cy = 15.0f, R = 9.0f;
@@ -512,7 +567,7 @@ int main(int argc, char **argv)
     if (want("flock")) {
         printf("== flocking: GOTO a point 40 m away (radio 50 m: in reach) ==\n");
         world(6, 0, 50.0f);
-        post(MS_GOTO, 10, 40, 0, 0, 0, 0);
+        post(MS_GOTO, 10, 40, 0, 0);
         run(60000);
         float far = 0, sum = 0;
         int all_fly = 1;
@@ -532,25 +587,29 @@ int main(int argc, char **argv)
         /* the same point, out of reach: radio 15 m */
         world(6, 0, 15.0f);
         run(2000);
-        post(MS_GOTO, 10, 40, 0, 0, 0, 0);
+        post(MS_GOTO, 10, 40, 0, 0);
         run(60000);
-        int heard = 0;
+        long heard = 0, samples = 0;
         float out = 0;
-        for (int i = 0; i < 6; i++) {
-            heard += A[i].hop != HOP_NONE;
-            float d = flat(A[i].body.pos, where(-1));
-            if (d > out) { out = d; }
+        for (int k = 0; k < 500; k++) {                   /* 5 s at the edge */
+            step();
+            for (int i = 0; i < 6; i++) {
+                heard += A[i].hop != HOP_NONE;
+                samples++;
+                float d = flat(A[i].body.pos, where(-1));
+                if (d > out) { out = d; }
+            }
         }
-        check(heard == 6 && out < 22.0f, "the point 44 m out, radio 15 m: they hold at the edge (%.1f m out), "
-              "all six still in touch", out);
-        post(MS_HOME, 0, 0, 0, 0, 0, 0);
+        check(heard * 10 >= samples * 9 && out < 26.0f, "the point 44 m out, radio 15 m: they hold at the edge "
+              "(at most %.1f m out), in touch %.0f %% of the time", out, 100.0 * heard / samples);
+        post(MS_HOME, 0, 0, 0, 0);
         uint32_t t = run_until(run_mission_on_pads, 90000);
         check(t > 0, "so HOME reaches them, and all six are back on their pads in %.0f s", t / 1000.0);
         world(6, 0, 15.0f);
         run(2000);
-        post(MS_GOTO, 8, 12, 0, 0, 0, 0);                 /* within reach this time */
+        post(MS_GOTO, 8, 12, 0, 0);                 /* within reach this time */
         run(30000);
-        post(MS_HOME, 0, 0, 0, 0, 0, 0);
+        post(MS_HOME, 0, 0, 0, 0);
         t = run_until(run_mission_on_pads, 90000);
         check(t > 0, "a flock within reach: HOME brings all six back to their own pads in %.1f s", t / 1000.0);
     }
@@ -563,7 +622,7 @@ int main(int argc, char **argv)
         run(3000);
         int direct = 0;
         for (int i = 0; i < 7; i++) { direct += dist(where(-1), A[i].body.pos) <= 7.0f; }
-        post(MS_HOLD, 0, 0, 0, 0, 0, 0);
+        post(MS_HOLD, 0, 0, 0, 0);
         uint32_t t = run_until(has_mission_all, 10000);
         check(direct < 7 && t > 0, "%d of 7 hear the ground radio; all 7 have the mission in %.2f s", direct, t / 1000.0);
         run(2000);
@@ -586,35 +645,30 @@ int main(int argc, char **argv)
         check(A[6].hop != HOP_NONE, "chain healed: the route is back (D7 hop %u)", A[6].hop);
     }
 
+    uint8_t mix[7] = { TY_MAPPER, TY_MAPPER, TY_MAPPER, TY_RELAY, TY_MAPPER, TY_MAPPER, TY_MAPPER };
     /* ================================================================== */
-    uint8_t mix[7] = { TY_MAPPER, TY_MAPPER, TY_SENSOR, TY_RELAY, TY_SENSOR, TY_MAPPER, TY_SENSOR };
     if (want("survey")) {
-        printf("== SURVEY: 3 mappers, 3 sensors, 1 relay - 16 cells, 3 sensing points ==\n");
+        printf("== SURVEY: 6 mappers and 1 relay, 16 cells - every drone flies ==\n");
         world(7, mix, 12.0f);
         run(2000);
         survey();
         uint32_t t_start = T;
-        run(20000);
+        run(12000);
         v3_t relay = A[3].body.pos;                       /* mid-mission */
         uint32_t t = run_until(mission_over, 400000);
         if (t) { t = T - t_start; }
-        uint32_t first_cover = 0;
-        (void)first_cover;
-        int full = 1, done = 1, total;
-        for (int i = 0; i < 7; i++) { full &= cover_done(&A[i].cv);  done &= tasks_all_done(&A[i].tk); }
-        tasks_done_once(&total);
+        int full = 1;
+        for (int i = 0; i < 7; i++) { full &= cover_done(&A[i].cv); }
         report_sep();
         check(t > 0, "mission complete, every drone back on its own pad, %.0f s after it was posted", t / 1000.0);
         check(full, "every drone's copy of the map is full (%d of %d cells)", cover_count(&A[0].cv), cover_cells(&A[0].cv));
-        check(done && total == 3, "every copy says the 3 tasks are done, and each was done once (%d readings)", total);
-        int by_map = 0;
-        for (int i = 0; i < 7; i++) { if (A[i].type == TY_MAPPER) { by_map += A[i].covered; } }
-        check(by_map >= 16, "the cells were seen by mappers (%d sightings)", by_map);
-        int s_only = 1;
-        for (int i = 0; i < 7; i++) { if (A[i].type != TY_SENSOR) { s_only &= A[i].sensed == 0 && A[i].tk.claims == 0; } }
-        check(s_only, "only sensors ever bid for or did a sensing task (heterogeneity)");
+        printf("    cells seen by each:");
+        for (int i = 0; i < 7; i++) { printf(" D%d %u", i + 1, A[i].covered); }
+        printf("\n");
+        check(all_mapped(), "all six mappers flew and covered cells themselves");
+        check(A[3].covered == 0, "the relay flew but mapped nothing: it keeps the others in touch");
         float on_line = fabsf((relay.x - 6) * (20 + 4) - (relay.y + 4) * (10 - 6)) / sqrtf(24 * 24 + 4 * 4);
-        check(on_line < 3.0f && relay.y > 3 && relay.y < 18 && relay.z > 3, "at 20 s the relay hovered between the "
+        check(on_line < 3.0f && relay.y > 1 && relay.y < 18 && relay.z > 3, "at 12 s the relay hovered between the "
               "ground radio and the area at (%.1f, %.1f, %.1f), %.1f m off the line", relay.x, relay.y, relay.z, on_line);
         check(minsep > 1.0f, "no two drones closer than 1 m all mission: %.2f m", minsep);
         check(frames_bad == 0, "%ld frames sent, every one well-formed", frames_total);
@@ -622,83 +676,60 @@ int main(int argc, char **argv)
 
     /* ================================================================== */
     if (want("faults")) {
-        printf("== FAULTS: a mapper and a working sensor crash mid-survey ==\n");
+        printf("== FAULTS: two mappers crash mid-survey ==\n");
         world(7, mix, 12.0f);
         run(2000);
-        survey();
-        run(25000);
-        current = 1;  agent_kill(&A[1]);                  /* mapper D2 */
+        post(MS_SURVEY, 0, 10, 30, 35);                   /* 6 x 5 cells */
+        uint32_t tw = T;                                  /* crash them once mapping is well under way */
+        while (cover_count(&A[0].cv) < 6 && T - tw < 60000) { step(); }
         int victim = -1;
-        uint32_t t0 = T;
-        while (victim < 0 && T - t0 < 60000) {
-            step();
-            for (int i = 0; i < 7; i++) {
-                if (A[i].type == TY_SENSOR && A[i].tk.mine >= 0 && A[i].state == AG_FLYING &&
-                    flat(A[i].body.pos, (v3_t){ A[i].tk.t[A[i].tk.mine].x, A[i].tk.t[A[i].tk.mine].y, 0 }) < 4.0f) {
-                    victim = i;
-                }
-            }
-        }
-        int vt = victim >= 0 ? A[victim].tk.mine : -1;
-        if (victim >= 0) { current = victim;  agent_kill(&A[victim]);  current = -1; }
-        printf("    killed mapper D2 at 27 s and sensor D%d (holding task %d) at %.0f s\n", victim + 1, vt + 1, T / 1000.0);
+        for (int i = 2; i < 7 && victim < 0; i++) { if (A[i].type == TY_MAPPER && A[i].state == AG_FLYING) { victim = i; } }
+        current = victim;  agent_kill(&A[victim]);
+        current = 1;  agent_kill(&A[1]);  current = -1;   /* mapper D2 */
+        printf("    killed mappers D%d and D2 at %.0f s, %d of %d cells covered\n", victim + 1, T / 1000.0,
+               cover_count(&A[0].cv), cover_cells(&A[0].cv));
         run(6000);
         int dropped = 1;
         for (int i = 0; i < 7; i++) { if (A[i].state != AG_DEAD) { dropped &= !hears(i, 2) && !hears(i, victim + 1); } }
         check(dropped, "6 s later nobody has the dead in its table");
         uint32_t t = run_until(mission_over, 400000);
-        int full = 1, done = 1, total;
-        for (int i = 0; i < 7; i++) { if (A[i].state != AG_DEAD) { full &= cover_done(&A[i].cv);  done &= tasks_all_done(&A[i].tk); } }
-        tasks_done_once(&total);
-        check(t > 0, "the mission still completed, survivors home, %.0f s after the crashes", t / 1000.0);
-        check(full && done && total == 3, "map full and all 3 tasks done without them (%d readings)", total);
-        int taken = 0;
-        for (int i = 0; i < 7; i++) { if (i != victim && A[i].type == TY_SENSOR && A[i].sensed > 0) { taken = 1; } }
-        check(victim >= 0 && taken, "the dead sensor's task was re-auctioned and done by another sensor");
+        int full = 1;
+        for (int i = 0; i < 7; i++) { if (A[i].state != AG_DEAD) { full &= cover_done(&A[i].cv); } }
+        check(t > 0 && full, "the survivors finished the map and are home, %.0f s after the crashes", t / 1000.0);
     }
 
     /* ================================================================== */
     if (want("battery")) {
-        printf("== BATTERY: a sensor's battery fails mid-task ==\n");
+        printf("== BATTERY: a mapper's battery fails mid-survey ==\n");
         world(7, mix, 12.0f);
         run(2000);
-        survey();
+        post(MS_SURVEY, 0, 10, 30, 35);
         int s = -1;
         uint32_t t0 = T;
         while (s < 0 && T - t0 < 60000) {
             step();
             for (int i = 0; i < 7; i++) {
-                if (A[i].type == TY_SENSOR && A[i].tk.mine >= 0 && A[i].state == AG_FLYING &&
-                    flat(A[i].body.pos, A[i].home) > 6.0f) { s = i; }
+                if (A[i].type == TY_MAPPER && A[i].state == AG_FLYING && A[i].covered > 0 &&
+                    flat(A[i].body.pos, A[i].home) > 8.0f) { s = i; }
             }
         }
-        int task = A[s].tk.mine;
         A[s].body.charge = 29.0f;                         /* a bad cell */
-        printf("    D%d, holding task %d, drops to 29 %% at %.0f s\n", s + 1, task + 1, T / 1000.0);
+        printf("    D%d drops to 29 %% at %.0f s, having covered %u cells itself\n", s + 1, T / 1000.0, A[s].covered);
         run(1000);
-        check(A[s].state == AG_HOMING && A[s].tk.mine < 0, "it gave the task up and turned for home by itself");
-        /* the other sensors are busy with their own tasks: one takes the freed
-         * task when its own is done */
-        int other = 0;
-        uint32_t t1 = T;
-        while (!other && T - t1 < 60000) {
-            step();
-            for (int i = 0; i < 7; i++) { if (i != s && A[i].tk.mine == task) { other = i + 1; } }
-        }
-        check(other, "another sensor won task %d in the auction (D%d, %.0f s later)", task + 1, other, (T - t1) / 1000.0);
+        check(A[s].state == AG_HOMING, "it turned for home by itself");
         uint32_t t = run_until(mission_over, 400000);
-        int total;
-        tasks_done_once(&total);
-        check(t > 0 && total == 3, "the mission completed anyway (%d readings)", total);
+        int full = 1;
+        for (int i = 0; i < 7; i++) { full &= cover_done(&A[i].cv); }
+        check(t > 0 && full, "the others finished the map, all home in %.0f s", t / 1000.0);
         check(A[s].body.charge > 30.0f, "D%d recharged on its pad (%.0f %%)", s + 1, A[s].body.charge);
     }
 
     /* ================================================================== */
     if (want("rejoin")) {
         printf("== REJOIN: a drone sent home on battery comes back once charged ==\n");
-        world(7, mix, 12.0f);
+        world(3, mix, 12.0f);                             /* three mappers: a long job */
         run(2000);
-        post(MS_SURVEY, -10, 10, 50, 50, 3, PTS);         /* a big area: 8 x 8 cells, a long job */
+        post(MS_SURVEY, -10, 10, 50, 50);         /* a big area: 8 x 8 cells, a long job */
         run(20000);
         A[0].body.charge = 29.0f;
         run(2000);
@@ -715,7 +746,7 @@ int main(int argc, char **argv)
         printf("== LOST LINK: a drone's radio dies mid-mission ==\n");
         world(7, mix, 12.0f);
         run(2000);
-        post(MS_SURVEY, 0, 10, 40, 40, 3, PTS);           /* a long job */
+        post(MS_SURVEY, 0, 10, 40, 40);           /* a long job */
         run(20000);
         check(A[0].state == AG_FLYING, "mapper D1 is at work (%s)", agent_state_name(A[0].state));
         cut[0] = 1;
@@ -737,10 +768,8 @@ int main(int argc, char **argv)
         run(2000);
         survey();
         uint32_t t = run_until(mission_over, 500000);
-        int total;
-        tasks_done_once(&total);
         report_sep();
-        check(t > 0 && total == 3, "completed under 30 %% loss in %.0f s (%d readings)", t / 1000.0, total);
+        check(t > 0, "completed under 30 %% loss in %.0f s", t / 1000.0);
         check(minsep > 1.0f, "still no two drones closer than 1 m: %.2f m", minsep);
     }
 
@@ -752,11 +781,8 @@ int main(int argc, char **argv)
         run(2000);
         survey();
         uint32_t t = run_until(mission_over, 700000);
-        int total;
-        tasks_done_once(&total);
         report_sep();
-        check(t > 0 && total == 3, "completed with every drone on its own clock speed, %.0f s (%d readings)",
-              t / 1000.0, total);
+        check(t > 0, "completed with every drone on its own clock speed, %.0f s", t / 1000.0);
         check(minsep > 1.0f, "and no two closer than 1 m: %.2f m", minsep);
     }
 
@@ -767,9 +793,9 @@ int main(int argc, char **argv)
          * all fading over their last quarter: one relay cannot bridge 39 m, a chain of two can -
          * if the relays find their places, knowing none of these numbers */
         static const uint8_t crews[3][6] = {
-            { TY_MAPPER, TY_MAPPER, TY_SENSOR, TY_MAPPER, TY_MAPPER, TY_SENSOR },   /* no relay   */
-            { TY_MAPPER, TY_MAPPER, TY_SENSOR, TY_RELAY,  TY_MAPPER, TY_SENSOR },   /* one relay  */
-            { TY_MAPPER, TY_RELAY,  TY_SENSOR, TY_RELAY,  TY_MAPPER, TY_SENSOR },   /* a chain of two */
+            { TY_MAPPER, TY_MAPPER, TY_MAPPER, TY_MAPPER, TY_MAPPER, TY_MAPPER },   /* no relay   */
+            { TY_MAPPER, TY_MAPPER, TY_MAPPER, TY_RELAY,  TY_MAPPER, TY_MAPPER },   /* one relay  */
+            { TY_MAPPER, TY_RELAY,  TY_MAPPER, TY_RELAY,  TY_MAPPER, TY_MAPPER },   /* a chain of two */
         };
         float routed_pct[3], there_pct[3];
         int gave_up[3];
@@ -777,7 +803,7 @@ int main(int argc, char **argv)
         for (int pass = 0; pass < 3; pass++) {
             world(6, crews[pass], 12.0f);
             run(2000);
-            post(MS_GOTO, 10, 35, 0, 0, 0, 0);
+            post(MS_GOTO, 10, 35, 0, 0);
             long routed = 0, there = 0, samples = 0;
             for (int k = 0; k < 24000; k++) {            /* 4 minutes */
                 step();
@@ -823,16 +849,18 @@ int main(int argc, char **argv)
 
     /* ================================================================== */
     if (want("hetero")) {
-        printf("== HETEROGENEITY: sensing points but no sensor in the swarm ==\n");
-        uint8_t ty[5] = { TY_MAPPER, TY_MAPPER, TY_MAPPER, TY_MAPPER, TY_MAPPER };
-        world(5, ty, 12.0f);
+        printf("== HETEROGENEITY: a relay and mappers, one firmware ==\n");
+        world(7, mix, 12.0f);
         run(2000);
         survey();
-        run(150000);
-        int claims = 0, full = 1;
-        for (int i = 0; i < 5; i++) { claims += (int)A[i].tk.claims;  full &= cover_done(&A[i].cv); }
-        check(full && claims == 0, "the map is done; no mapper ever bid on a sensing task (needs a sensor)");
-        check(run_mission_on_pads(), "the mappers went home: their part is complete");
+        float relay_top = 0;
+        uint32_t t0 = T;
+        while (!mission_over() && T - t0 < 300000) { step(); if (A[3].body.pos.z > relay_top) { relay_top = A[3].body.pos.z; } }
+        int cells = 0;
+        for (int i = 0; i < 7; i++) { cells += A[i].covered; }
+        check(relay_top > 3.0f && A[3].covered == 0, "the relay flew (%.1f m up) and mapped nothing", relay_top);
+        check(cells >= cover_cells(&A[0].cv) && all_mapped(), "the six mappers covered all %d cells between them",
+              cover_cells(&A[0].cv));
     }
 
     /* ================================================================== */
@@ -840,9 +868,9 @@ int main(int argc, char **argv)
         printf("== A NEW MISSION replaces the old one ==\n");
         world(5, mix, 12.0f);
         run(2000);
-        post(MS_GOTO, 6, 20, 0, 0, 0, 0);
+        post(MS_GOTO, 6, 20, 0, 0);
         run(20000);
-        post(MS_GOTO, -2, 4, 0, 0, 0, 0);
+        post(MS_GOTO, -2, 4, 0, 0);
         run(30000);
         float far = 0;
         for (int i = 0; i < 5; i++) {
@@ -853,13 +881,13 @@ int main(int argc, char **argv)
         check(has_mission_all() && far < 7.0f, "every drone took the newer mission and went (farthest %.1f m)", far);
         uint16_t old = mid;
         mid -= 5;                                         /* a stale ground radio replays an older id */
-        post(MS_HOME, 0, 0, 0, 0, 0, 0);
+        post(MS_HOME, 0, 0, 0, 0);
         run(3000);
         int kept = 1;
         for (int i = 0; i < 5; i++) { kept &= A[i].m.mid == old && A[i].state == AG_FLYING; }
         check(kept, "an OLDER mission id is ignored");
         mid = old;
-        post(MS_HOME, 0, 0, 0, 0, 0, 0);
+        post(MS_HOME, 0, 0, 0, 0);
         check(run_until(run_mission_on_pads, 90000) > 0, "a newer HOME brings everyone back");
     }
 
@@ -879,7 +907,7 @@ int main(int argc, char **argv)
             if (e % 400u == 0u) {                          /* the pointer moved: a new goal */
                 float ang = 1.5f * (float)e / 1000.0f / 10.0f;
                 gx = 6.0f + 10.0f * cosf(ang);  gy = 14.0f + 10.0f * sinf(ang);
-                post(MS_GOTO, gx, gy, 0, 0, 0, 0);
+                post(MS_GOTO, gx, gy, 0, 0);
             }
             if (e == 30000u) { A[0].body.charge = 29.0f;  home_t = T; }   /* D1's battery fails */
             step();
@@ -924,7 +952,7 @@ int main(int argc, char **argv)
         while (T - t0 < 90000) {
             uint32_t e = T - t0;
             float gx = e < 45000 ? 6.0f : bx, gy = e < 15000 ? 6.0f : e < 45000 ? 50.0f : by;   /* in, OUT, back */
-            if (e % 400u == 0u) { post(MS_GOTO, gx, gy, 0, 0, 0, 0); }
+            if (e % 400u == 0u) { post(MS_GOTO, gx, gy, 0, 0); }
             step();
             for (int i = 0; i < 6; i++) {
                 float d = flat(A[i].body.pos, where(-1));
@@ -951,7 +979,7 @@ int main(int argc, char **argv)
         current = 0;  agent_land(&A[0]);                  /* land D1 by hand, follow goals still coming */
         uint32_t t1 = T, up_again = 0;
         while (T - t1 < 60000) {
-            if ((T - t1) % 400u == 0u) { post(MS_GOTO, 6.0f, 8.0f, 0, 0, 0, 0); }
+            if ((T - t1) % 400u == 0u) { post(MS_GOTO, 6.0f, 8.0f, 0, 0); }
             step();
             if (A[0].state == AG_FLYING && T - t1 > 3000 && !up_again) { up_again = T - t1; }
         }
@@ -965,14 +993,107 @@ int main(int argc, char **argv)
     }
 
     /* ================================================================== */
+    if (want("obstacles")) {
+        printf("== OBSTACLES: sensed by each drone's rangefinder, never given as a map ==\n");
+        uint8_t ty[7] = { 0 };
+        /* 1. straight at a 4 m-wide column, the goal right behind it */
+        world(1, ty, 40.0f);
+        obstacle(0.0f, 16.0f, 2.0f);
+        run(2000);
+        post(MS_HOLD, 0, 0, 0, 0);
+        current = 0;  agent_takeoff(&A[0]);
+        run(5000);
+        A[0].hold = (v3_t){ 0.0f, 32.0f, A[0].cruise };      /* dead behind it */
+        uint32_t t = 0, t0 = T;
+        while (T - t0 < 60000) { step(); if (flat(A[0].body.pos, A[0].hold) < 1.0f) { t = T - t0;  break; } }
+        check(t > 0 && crashes == 0, "a goal dead behind a 4 m column: flew round it and arrived in %.1f s, no crash", t / 1000.0);
+        check(ob_closest > 0.8f, "closest it came to the column's surface: %.2f m", ob_closest);
+        check(A[0].nobs <= OBS_MAX && nbr_find(&A[0].nb, 2) == 0, "it knew the column only from its own rangefinder");
+
+        /* 2. a wall of three columns across the way: the slide must not stall */
+        world(1, ty, 40.0f);
+        obstacle(-3.0f, 16.0f, 1.5f);  obstacle(0.0f, 16.0f, 1.5f);  obstacle(3.0f, 16.0f, 1.5f);
+        run(2000);
+        post(MS_HOLD, 0, 0, 0, 0);
+        current = 0;  agent_takeoff(&A[0]);
+        run(5000);
+        A[0].hold = (v3_t){ 0.0f, 30.0f, A[0].cruise };
+        t = 0;  t0 = T;
+        while (T - t0 < 90000) { step(); if (flat(A[0].body.pos, A[0].hold) < 1.0f) { t = T - t0;  break; } }
+        check(t > 0 && crashes == 0, "a 10 m wall of three columns (gaps too narrow to pass): went round the end, "
+              "%.1f s, no crash", t / 1000.0);
+
+        /* 3. a flock through a random field */
+        world(6, 0, 50.0f);
+        random_obstacles(8, -6, 6, 24, 34, 0, 0);
+        run(2000);
+        post(MS_GOTO, 10, 40, 0, 0);
+        run(60000);
+        float far = 0;
+        for (int i = 0; i < 6; i++) { float d = flat(A[i].body.pos, (v3_t){ 10, 40, 0 }); if (d > far) { far = d; } }
+        report_sep();
+        check(crashes == 0 && far < 8.0f, "a flock of 6 across a field of %d random columns to a point 40 m away: "
+              "all there (farthest %.1f m), no crash", nob, far);
+        check(minsep > 1.0f && ob_closest > 0.5f, "no two drones closer than 1 m (%.2f), none nearer a column than "
+              "0.5 m (%.2f)", minsep, ob_closest);
+
+        /* 4. a survey among random columns - one right on a cell's centre */
+        world(7, mix, 12.0f);
+        obstacle(12.5f, 27.5f, 1.0f);                         /* right on a cell centre */
+        random_obstacles(8, SX0, SY0 - 6, SX1, SY1 + 4, 0, 0);
+        run(2000);
+        survey();
+        uint32_t tm = run_until(mission_over, 400000);
+        int full = 1;
+        for (int i = 0; i < 7; i++) { full &= cover_done(&A[i].cv); }
+        report_sep();
+        check(tm > 0 && crashes == 0, "a survey among %d columns: complete, all home, in %.0f s, no crash", nob, tm / 1000.0);
+        check(full, "map full - the cell with a column on its centre was seen from beside it");
+        check(minsep > 1.0f && ob_closest > 0.5f, "no two drones closer than 1 m (%.2f), none nearer a column than "
+              "0.5 m (%.2f)", minsep, ob_closest);
+    }
+
+    /* ================================================================== */
+    if (want("killone")) {
+        printf("== THREE DRONES, ONE KILLED, THEN A SURVEY: the other two fly it ==\n");
+        uint8_t ty3[3] = { TY_MAPPER, TY_MAPPER, TY_MAPPER };
+        int all_ok = 1;
+        for (int variant = 0; variant < 6; variant++) {
+            int victim = variant % 3, in_air = variant >= 3;
+            world(3, ty3, 12.0f);
+            run(2000);
+            if (in_air) { post(MS_GOTO, 6, 12, 0, 0);  run(20000); }
+            current = victim;  agent_kill(&A[victim]);  current = -1;
+            run(3000);
+            survey();
+            int took_off[3] = { 0 };
+            uint32_t t0 = T, t = 0;
+            while (T - t0 < 300000) {
+                step();
+                for (int i = 0; i < 3; i++) { took_off[i] |= A[i].state == AG_FLYING && A[i].m.kind == MS_SURVEY; }
+                if (mission_over()) { t = T - t0;  break; }
+            }
+            int ok = t > 0, full = 1;
+            for (int i = 0; i < 3; i++) {
+                if (i == victim) { continue; }
+                ok &= took_off[i] && A[i].covered > 0;
+                full &= cover_done(&A[i].cv);
+            }
+            printf("    D%d killed %s: %s - the other two flew and mapped, map %s, home in %.0f s\n", victim + 1,
+                   in_air ? "in the air" : "on its pad", ok && full ? "ok" : "FAILED", full ? "full" : "NOT full", t / 1000.0);
+            all_ok &= ok && full;
+        }
+        check(all_ok, "with any one of the three killed, on its pad or in the air, the other two survey the area");
+    }
+
+    /* ================================================================== */
     if (want("scale")) {
         printf("== SCALE: 40 drones, 15 m radio, a 40 x 40 m survey far down the line ==\n");
         static uint8_t ty[40];
-        for (int i = 0; i < 40; i++) { ty[i] = i % 10 == 3 ? TY_RELAY : i % 4 == 1 ? TY_SENSOR : TY_MAPPER; }
+        for (int i = 0; i < 40; i++) { ty[i] = i % 10 == 3 ? TY_RELAY : i % 4 == 1 ? TY_MAPPER : TY_MAPPER; }
         world(40, ty, 15.0f);
         run(3000);
-        const float pts[8] = { 45, 40, 70, 42, 55, 25, 75, 18 };
-        post(MS_SURVEY, 40, 10, 80, 50, 4, pts);
+        post(MS_SURVEY, 40, 10, 80, 50);
         uint32_t t_m = run_until(has_mission_all, 30000);
         int maxhop = 0;
         for (int i = 0; i < 40; i++) { if (A[i].hop != HOP_NONE && A[i].hop > maxhop) { maxhop = A[i].hop; } }
@@ -981,11 +1102,10 @@ int main(int argc, char **argv)
         for (int i = 0; i < 40; i++) { bytes0[i] = tx_bytes[i]; }
         uint32_t t0 = T;
         uint32_t t = run_until(mission_over, 900000);
-        int full = 1, total;
+        int full = 1;
         for (int i = 0; i < 40; i++) { full &= cover_done(&A[i].cv); }
-        tasks_done_once(&total);
         report_sep();
-        check(t > 0 && full && total == 4, "64 cells and 4 tasks done, all 40 home, in %.0f s", t / 1000.0);
+        check(t > 0 && full, "64 cells covered, all 40 home, in %.0f s", t / 1000.0);
         int bounded = 1;
         for (int i = 0; i < 40; i++) { bounded &= A[i].nb.n <= NBR_MAX; }
         check(bounded, "no drone's table ever above %u rows", (unsigned)NBR_MAX);

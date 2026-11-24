@@ -215,7 +215,7 @@ static void task_ui(void *arg)
 /* ============================================================================
  *  The straps: which drone this board is, and what it carries
  *    ID    PB0, PA7, PA15  bits 0, 1, 2   (1..7)
- *    TYPE  PB1, PB2        bits 0, 1      0 mapper (camera)  1 sensor  2 relay
+ *    TYPE  PB1, PB2        bits 0, 1      0 or 1 mapper (camera)  2 relay
  *  A strap tied to GND reads 1.
  * ============================================================================ */
 static uint8_t straps(GPIO_TypeDef *const *port, const uint8_t *pin, int n)

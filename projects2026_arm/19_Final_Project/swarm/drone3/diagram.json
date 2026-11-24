@@ -15,7 +15,6 @@
 
     [ "nucleo:PB0", "nucleo:GND.3", "gray", [] ],
     [ "nucleo:PA7", "nucleo:GND.3", "gray", [] ],
-    [ "nucleo:PB1", "nucleo:GND.3", "gray", [] ],
 
     [ "stick:HORZ", "nucleo:PA0",   "orange", [] ],
     [ "stick:VERT", "nucleo:PA1",   "yellow", [] ],

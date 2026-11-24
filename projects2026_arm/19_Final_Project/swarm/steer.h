@@ -19,6 +19,12 @@
  *                the whole flock shares (GOTO) stops pulling STEER_SLACK
  *                short of it - otherwise every drone presses to the same
  *                point and only separation holds them apart
+ *   obstacles    the ones this drone's rangefinder has seen (agent.c): kept
+ *                OBS_SEP from their surface, the same look-ahead as for a
+ *                drone (one that never moves), and when the goal lies behind
+ *                one - pulling straight into it - SLIDE round it, always to
+ *                the right of the way in: the head-on rule again, so a drone
+ *                pressed against an obstacle cannot stall there
  *   cohesion     toward my neighbours' centre       (flocking only)
  *   alignment    toward my neighbours' mean velocity (flocking only)
  *
@@ -43,6 +49,15 @@
 #define STEER_AVOID  3.0f      /* m: a predicted pass closer than this is avoided */
 #define STEER_SLACK  3.0f      /* m: a SHARED goal (GOTO) only pulls from further out */
 #define STEER_HORIZ  3.0f      /* s: how far ahead it looks                     */
+#define OBS_SEP      2.0f      /* m kept from an obstacle's surface             */
+#define OBS_MAX      6u        /* obstacles a drone keeps in mind               */
+
+/* An obstacle: a round column, taller than any lane.  dm, so 6 fit in 48 B. */
+typedef struct {
+    int16_t  x, y;             /* its centre, dm                                */
+    uint8_t  id, r;            /* the world's number for it; its radius, dm     */
+    uint32_t seen_ms;          /* when the rangefinder last saw it (my clock)   */
+} obst_t;
 
 typedef struct {
     v3_t  me, vel;             /* my estimate                                   */
@@ -51,6 +66,8 @@ typedef struct {
     float k_coh, k_ali;        /* 0 unless flocking                             */
     float slack;               /* m: the goal pulls only from beyond this       */
     float vmax;                /* <= STEER_VMAX                                  */
+    const obst_t *obs;         /* the obstacles in mind                         */
+    uint8_t nobs;
 } steer_in_t;
 
 typedef struct {

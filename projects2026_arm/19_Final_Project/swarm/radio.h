@@ -10,17 +10,17 @@
  *        battery %, mode (AG_*), neighbours I hear, my type (TY_*), my hops
  *        to the ground radio (HOP_NONE: no route), where I am heading (dm),
  *        and the newest ground-radio beacon number my route is built on
- *   $MSN,mid,kind,gx,gy,x0,y0,x1,y1,np,p1x,p1y,...             relayed
+ *   $MSN,mid,kind,gx,gy,x0,y0,x1,y1                           relayed
  *        the MISSION, posted by the operator's ground radio and FLOODED
  *        drone to drone: a newer mid replaces an older one (agent.c)
- *   $TSK,from,mid,n, w,b,s,a,d, ...                           gossip, 1 Hz
- *        what I know of the mission's sensing tasks: per task its winner,
- *        winning bid (dm), the winner's stamp, how old that stamp is (0.1 s)
- *        and whether it is done (tasks.h)
  *   $MAP,from,mid,hi,lo                                        gossip, 1 Hz
  *        which cells of the survey area I know are covered (cover.h)
- *   $GND,seq,x,y                                               1 Hz
+ *   $GND,seq,x,y                                               5 Hz
  *        the ground radio's own beacon: where it is (dm)
+ *
+ * Not radio, but the simulated world talking to ONE drone (swarm_station.py):
+ *   $OBS,k,x,y,r     its rangefinder sees obstacle k at (x, y), radius r (dm)
+ *   $HIT,id          drone id has flown into an obstacle: it crashes
  *
  * Pure C, no hardware: host/ compiles it too.
  */

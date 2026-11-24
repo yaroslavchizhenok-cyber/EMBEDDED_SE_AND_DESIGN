@@ -2,7 +2,7 @@
 # window, then F1 -> "Wokwi: Start Simulator".  Every drone flies the same
 # ../Main.hex (build it with ../build.bat).  diagram.json's straps make this
 # board drone 6, a mapper: PB0/PA7/PA15 to GND are ID bits 0/1/2,
-# PB1/PB2 to GND are TYPE bits 0/1 (0 mapper, 1 sensor, 2 relay).
+# PB1/PB2 to GND are TYPE bits 0/1 (0 mapper, 2 relay).
 [wokwi]
 version = 1
 firmware = '../Main.hex'

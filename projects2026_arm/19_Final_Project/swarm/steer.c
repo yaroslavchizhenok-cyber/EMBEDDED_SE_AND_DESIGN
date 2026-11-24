@@ -11,6 +11,33 @@
 
 static float len2(float x, float y) { return t_sqrt(x * x + y * y); }
 
+/* LOOK AHEAD, for a drone and for an obstacle alike.  r: where it is from
+ * me; w: how it moves relative to me (an obstacle: minus my velocity); rad:
+ * its size (0 for a drone); zone: a pass closer than this is avoided.  Adds
+ * the sideways push to *sx, *sy; returns the goal speed factor (1: no
+ * conflict, 0.3: a dead-centre pass). */
+static float look_ahead(float rx, float ry, float wx, float wy, float rad, float zone, float vmax,
+                        float *sx, float *sy)
+{
+    float closing = rx * wx + ry * wy;                   /* < 0: getting closer */
+    float w2 = wx * wx + wy * wy;
+    if (closing >= 0.0f || w2 <= 0.01f) { return 1.0f; }
+    float t = -closing / w2;
+    if (t >= STEER_HORIZ) { return 1.0f; }
+    float qx = rx + wx * t, qy = ry + wy * t;            /* where it will be, from me */
+    float qd = len2(qx, qy), dmin = qd - rad;
+    if (dmin >= zone) { return 1.0f; }
+    if (dmin < 0.0f) { dmin = 0.0f; }
+    float k = K_AVOID * vmax * (1.0f - dmin / zone) * (1.0f - 0.5f * t / STEER_HORIZ);
+    if (qd > rad + 0.3f) { *sx -= k * qx / qd;  *sy -= k * qy / qd; }   /* open the gap */
+    else {                                                              /* head-on: keep RIGHT */
+        float dh = len2(rx, ry);
+        if (dh < 0.01f) { dh = 1.0f; }
+        *sx += k * ry / dh;  *sy -= k * rx / dh;
+    }
+    return 0.3f + 0.7f * dmin / zone;
+}
+
 void steer(const steer_in_t *in, const nbrs_t *nb, uint32_t now_ms, steer_out_t *out)
 {
     float vmax = in->vmax > 0.0f && in->vmax < STEER_VMAX ? in->vmax : STEER_VMAX;
@@ -42,32 +69,37 @@ void steer(const steer_in_t *in, const nbrs_t *nb, uint32_t now_ms, steer_out_t 
         }
 
         /* avoidance: the closest approach in the next STEER_HORIZ seconds */
-        float wx = o->vel.x - in->vel.x, wy = o->vel.y - in->vel.y;
-        float closing = rx * wx + ry * wy;                 /* < 0: getting closer */
-        float w2 = wx * wx + wy * wy;
-        if (closing < 0.0f && w2 > 0.01f) {
-            float t = -closing / w2;
-            if (t < STEER_HORIZ) {
-                float qx = rx + wx * t, qy = ry + wy * t;  /* where it will be, from me */
-                float dmin = len2(qx, qy);
-                if (dmin < STEER_AVOID && t > 0.0f) {
-                    float k = K_AVOID * vmax * (1.0f - dmin / STEER_AVOID) * (1.0f - 0.5f * t / STEER_HORIZ);
-                    float b = 0.3f + 0.7f * dmin / STEER_AVOID;   /* 0.3 at a dead-centre pass */
-                    if (b < brake) { brake = b; }
-                    float ux, uy;
-                    if (dmin > 0.3f) { ux = -qx / dmin;  uy = -qy / dmin; }  /* open the gap */
-                    else {                                   /* head-on: keep RIGHT */
-                        ux = ry / (dh > 0.01f ? dh : 1.0f);  uy = -rx / (dh > 0.01f ? dh : 1.0f);
-                    }
-                    sx += k * ux;  sy += k * uy;
-                    out->avoiding = 1;
-                }
-            }
-        }
+        float b = look_ahead(rx, ry, o->vel.x - in->vel.x, o->vel.y - in->vel.y, 0.0f, STEER_AVOID, vmax, &sx, &sy);
+        if (b < 1.0f) { out->avoiding = 1;  if (b < brake) { brake = b; } }
 
         if (in->k_coh > 0.0f || in->k_ali > 0.0f) {
             if (o->mode == 2u) {                           /* flying neighbours only */
                 cx += px;  cy += py;  ax += o->vel.x;  ay += o->vel.y;  flock++;
+            }
+        }
+    }
+
+    /* obstacles: they never move */
+    float ex = 0, ey = 0, e = 0;
+    if (in->has_goal) { ex = in->goal.x - in->me.x;  ey = in->goal.y - in->me.y;  e = len2(ex, ey); }
+    for (unsigned i = 0; i < in->nobs; i++) {
+        const obst_t *o = &in->obs[i];
+        float rx = (float)o->x * 0.1f - in->me.x, ry = (float)o->y * 0.1f - in->me.y, r = (float)o->r * 0.1f;
+        float dc = len2(rx, ry), ds = dc - r;                 /* to its centre; to its surface */
+        if (dc < 0.01f) { continue; }
+        float ux = -rx / dc, uy = -ry / dc;                   /* straight away from it */
+        if (ds < OBS_SEP) {                                   /* too close: push out   */
+            float q = OBS_SEP / (ds > 0.2f ? ds : 0.2f);
+            float k = K_SEP * (q * q - 1.0f);
+            sx += k * ux;  sy += k * uy;
+        }
+        float b = look_ahead(rx, ry, -in->vel.x, -in->vel.y, r, OBS_SEP, vmax, &sx, &sy);   /* it never moves */
+        if (b < 1.0f) { out->avoiding = 1;  if (b < brake) { brake = b; } }
+        if (ds < OBS_SEP + 1.5f && e > 0.01f) {               /* the goal is behind it: slide */
+            float into = -(ex * ux + ey * uy) / e;            /* 1: dead behind it */
+            if (into > 0.2f) {
+                float k = 0.6f * vmax * into;
+                sx += k * ry / dc;  sy -= k * rx / dc;        /* round it, to the right */
             }
         }
     }

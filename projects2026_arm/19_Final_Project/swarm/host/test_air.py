@@ -16,6 +16,7 @@ test_air.py - the station's air and ground radio, alone and with drones on it.
 Exit code 0 = every check passed.
 """
 
+import math
 import os
 import queue
 import subprocess
@@ -67,7 +68,7 @@ check(m.carry(3, [1, 2, 3]) == [], "a drone that went away is not carried")
 print("== five drone_pc.exe and the station's air: a SURVEY, start to finish ==")
 exe = os.path.join(HERE, "out", "drone_pc.exe")
 ports = [4101, 4102, 4103, 4104, 4105]
-types = [0, 0, 1, 2, 1]                         # mapper mapper sensor relay sensor
+types = [0, 0, 0, 2, 0]                         # four mappers and a relay
 procs = [subprocess.Popen([exe, str(i + 1), str(p), str(t)], stdout=subprocess.DEVNULL)
          for i, (p, t) in enumerate(zip(ports, types))]
 written, sent = [], set()
@@ -98,6 +99,8 @@ try:
 
     state = {}                                  # port -> (mode, x, y, z)
     texts = []
+    top = {}                                    # port -> highest it flew, m
+    maps = {}                                   # port -> its copy of the map: covered cells
 
     def pump(seconds, until=None):
         end = time.monotonic() + seconds
@@ -108,6 +111,10 @@ try:
                 continue
             if kind == "PHY":
                 state[port] = (int(data[7]), int(data[1]) / 100, int(data[2]) / 100, int(data[3]) / 100)
+                top[port] = max(top.get(port, 0.0), state[port][3])
+            elif kind == "MAP":
+                w = [int(v) for v in data[2:6]]
+                maps[port] = bin((w[0] << 48) | (w[1] << 32) | (w[2] << 16) | w[3]).count("1")
             elif kind == "text":
                 texts.append((port, data))
             if until and until():
@@ -117,17 +124,16 @@ try:
     pump(3.0)
     check(len(state) == 5 and all(s[0] == 1 for s in state.values()), "five drones up, on their pads")
     t0 = time.monotonic()
-    mid = air.post(2, (0, 10, 20, 30), [(3, 27), (17, 13), (10, 20)])
+    mid = air.post(2, (0, 10, 20, 30))
     pump(8.0)
     check(all(s[0] == 2 for s in state.values()), "the mission reached them through the ground radio: all five took off")
     done = pump(150.0, until=lambda: len(state) == 5 and all(s[0] == 1 and s[3] < 0.2 for s in state.values())
                 and sum("going home: mission complete" in t for _, t in texts) == 5)
     took = time.monotonic() - t0
-    readings = [t for _, t in texts if "done: reading" in t]
     check(done, f"survey complete and all five landed again, {took:.0f} s after posting (real time)")
-    check(len(readings) == 3, f"three sensing tasks done, once each: {len(readings)} readings")
-    who = {p for p, t in texts if "done: reading" in t}
-    check(who <= {4103, 4105}, "only the sensors (ports 4103, 4105) did sensing tasks")
+    check(len(top) == 5 and all(z > 3.0 for z in top.values()), "every drone flew: "
+          + ", ".join(f"{z:.1f}" for z in top.values()) + " m up at the most")
+    check(len(maps) == 5 and all(n == 16 for n in maps.values()), f"every drone's copy of the map is full: {maps}")
     on_pad = all(abs(state[p][1] - 3 * i) < 1.0 and abs(state[p][2]) < 1.0 for i, p in enumerate(ports))
     check(on_pad, "every drone landed on its own pad")
     bad = [t for _, t in written if not t.startswith(("$BCN,", "$MSN,", "$TSK,", "$MAP,", "$GND,"))]
@@ -135,6 +141,55 @@ try:
     forged = [t for _, t in written if t not in sent]
     check(not forged, "every one of them was a drone's or the ground radio's own transmission, unchanged")
     check(air.carried > 1000, f"{air.carried} frames carried on the air")
+finally:
+    for p in procs:
+        p.kill()
+
+print("== obstacles: the station's rangefinder and collisions, five drone_pc.exe ==")
+from radio_medium import make_obstacles   # noqa: E402
+o1 = make_obstacles(6, 1234, [(0.0, 0.0, 4.0)])
+check(o1 == make_obstacles(6, 1234, [(0.0, 0.0, 4.0)]) and o1 != make_obstacles(6, 4321, [(0.0, 0.0, 4.0)]),
+      "the same seed gives the same obstacles; another seed, others")
+check(all(math.hypot(a[0] - b[0], a[1] - b[1]) >= a[2] + b[2] + 5.0 for a in o1 for b in o1 if a is not b)
+      and all(math.hypot(x, y) >= r + 4.0 for x, y, r in o1), "none within 5 m of another, none over a kept-clear spot")
+ports = [4131 + i for i in range(5)]
+procs = [subprocess.Popen([exe, str(i + 1), str(p), "0"], stdout=subprocess.DEVNULL) for i, p in enumerate(ports)]
+hits = []
+try:
+    time.sleep(0.5)
+    medium = Medium(range_m=40.0, loss=0.0, ground=(6.0, -4.0))
+    air = swarm_station.Air(ports, "socket", 115200, medium, obstacles=[(6.0, 14.0, 2.0)])   # in the way
+    for ln in air.links.values():
+        orig = ln.write
+
+        def spy(text, orig=orig, port=ln.port):
+            if text.startswith("$HIT"):
+                hits.append(port)
+            return orig(text)
+        ln.write = spy
+    state = {}
+    obs_sent = 0
+
+    def watch(seconds):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            try:
+                kind, port, data = air.ui.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if kind == "PHY":
+                state[port] = (int(data[1]) / 100, int(data[2]) / 100, int(data[3]) / 100)
+
+    watch(3.0)
+    air.post(1, (6.0, 28.0, 0, 0))                       # GOTO straight through the column
+    watch(35.0)
+    obs_sent = sum(ln.carried for ln in air.links.values())
+    near = [math.hypot(x - 6.0, y - 28.0) for x, y, z in state.values()]
+    check(not air.crashed and not hits, "five drones flew a GOTO straight through a column: no crash")
+    check(len(near) == 5 and max(near) < 8.0, f"and all reached the far side (farthest {max(near):.1f} m from the goal)")
+    air._collide(ports[0], ["1", "600", "1400", "400"])   # the world: drone 1 is INSIDE the column
+    time.sleep(0.2)
+    check(ports[0] in air.crashed and hits == [ports[0]], "a drone inside a column: the station tells it HIT, once")
 finally:
     for p in procs:
         p.kill()
