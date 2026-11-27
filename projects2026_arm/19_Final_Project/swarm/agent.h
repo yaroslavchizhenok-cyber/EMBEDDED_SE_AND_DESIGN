@@ -20,10 +20,14 @@
  *                      rising is believed (DSDV: Perkins and Bhagwat, 1994) -
  *                      so a group cut off from home cannot keep a route alive
  *                      by quoting each other's old hop counts
- *   which job          its type (from its straps):
+ *   which job          its ROLE - every drone has the same hardware and radio;
+ *                      the straps only say which role it starts in:
  *                        MAPPER  covers the survey area cell by cell (cover.h)
  *                        RELAY   places itself between the ground radio and
  *                                the work, so the swarm stays connected
+ *                      If the swarm's relay dies, one mapper - picked "at
+ *                      random", by an order every drone works out the same
+ *                      way - takes its place (agent.c, think())
  *                      (The straps' type 1 was a SENSOR, for sensing points,
  *                      until 2026-11-25; there are none now, and a board
  *                      strapped 1 is a mapper: every drone flies the survey.)
@@ -68,6 +72,8 @@
 #define BAT_HOME       30.0f      /* %: below this, fly home                   */
 #define BAT_GO         60.0f      /* %: a drone on its pad rejoins above this  */
 #define LOST_MS        15000u     /* nobody heard for this long: fly home      */
+#define RELAY_GONE_MS  10000u     /* no news of a live relay this long: it is
+                                     dead, and a mapper takes its place          */
 #define NOROUTE_MS     60000u     /* no route to the ground radio this long: home */
 #define CUT_MS         3000u      /* GOTO: no fresh ground beacon number this long:
                                      out of reach - fall back, and learn the edge */
@@ -124,6 +130,10 @@ typedef struct {
     uint32_t cut_ms, edge_ms;     /* since when stale (0: fresh); last edge change */
     uint32_t probe_ms;            /* how long in touch before the next 1 m probe  */
     uint8_t  parked;              /* landed BY HAND: stays down until told        */
+    uint8_t  standin;             /* a mapper that took a dead relay's place      */
+    uint8_t  scout;               /* a mapper gone to see if the relay lives      */
+    uint8_t  relay_known;         /* the swarm has had a relay since I started    */
+    uint32_t relay_ms;            /* my freshest news of a live relay (my clock)  */
     obst_t   obs[OBS_MAX];        /* obstacles its rangefinder has seen           */
     uint8_t  nobs;
     uint8_t  falling_back;        /* GOTO: out of reach, flying back into it      */

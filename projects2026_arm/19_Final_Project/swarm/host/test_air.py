@@ -46,12 +46,12 @@ m.truth(2, ["2", "800", "0", "400", "0", "0", "0", "2", "0"])
 m.truth(3, ["3", "1500", "0", "400", "0", "0", "0", "2", "0"])
 check(m.carry(1, [1, 2, 3]) == [2], "8 m away hears it, 15 m away does not, the sender does not")
 m.truth(3, ["3", "1500", "0", "400", "0", "0", "0", "2", "2"])     # drone 3 is a relay now
-check(m.carry(1, [1, 2, 3]) == [2, 3], "a relay's bigger radio: the 1-3 link reaches 15 m (10 x (1 + 2) / 2)")
+check(m.carry(1, [1, 2, 3]) == [2], "a relay's radio is the same as any other: 15 m is still out of reach")
 check(m.carry(GROUND, [1, 2, 3]) == [], "the ground radio, 20 m away, reaches nobody")
 m.where[GROUND] = (0.0, -5.0, 1.0)
 check(m.carry(GROUND, [1, 2, 3]) == [1, 2], "moved to 5 m: it reaches drones 1 and 2")
 m.cut.add(2)
-check(m.carry(1, [1, 2, 3]) == [3] and m.carry(2, [1, 2, 3]) == [], "a cut radio neither hears nor sends")
+check(m.carry(1, [1, 2, 3]) == [] and m.carry(2, [1, 2, 3]) == [], "a cut radio neither hears nor sends")
 m.cut.clear()
 m.loss = 0.3
 got = sum(len(m.carry(1, [1, 2])) for _ in range(5000)) / 5000

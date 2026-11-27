@@ -23,7 +23,7 @@ static float dist2(v3_t a, v3_t b)
 static void fill(nbr_t *r, const bcn_t *b, uint32_t now)
 {
     r->mode = b->mode;  r->bat = b->bat;  r->nn = b->nn;  r->type = b->type;  r->hop = b->hop;
-    r->gs = b->gs;
+    r->gs = b->gs;  r->ra = b->ra;
     r->gx = (int16_t)b->gx;  r->gy = (int16_t)b->gy;
     r->seq  = b->seq;   r->heard_ms = now;
     r->pos  = (v3_t){ (float)b->x * 0.01f,  (float)b->y * 0.01f,  (float)b->z * 0.01f };

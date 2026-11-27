@@ -7,8 +7,8 @@ REM  Takes about two minutes (the last part runs in real time).
 REM
 REM    out\test_swarm.exe  the chip's agent.c, nbr.c, radio.c, steer.c and
 REM                        cover.c - one per drone - over a model of the
-REM                        station's air: 17 scenarios, 86 checks, run here
-REM                        under 10 different random seeds (860 checks)
+REM                        station's air: 18 scenarios, 94 checks, run here
+REM                        under 10 different random seeds (940 checks)
 REM    out\drone_pc.exe    ONE drone behind a TCP port - a test stand-in for a
 REM                        Wokwi window.  Not the swarm: the swarm is the chips.
 REM    test_air.py         the station's own air and ground radio with five

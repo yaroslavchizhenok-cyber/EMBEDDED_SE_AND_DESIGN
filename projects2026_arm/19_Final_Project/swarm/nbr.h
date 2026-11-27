@@ -40,7 +40,7 @@
                                      and out of the table every few seconds.)     */
 
 typedef struct {
-    uint8_t  id, mode, bat, nn, type, hop;
+    uint8_t  id, mode, bat, nn, type, hop, ra;
     uint8_t  q;                   /* link quality, %                            */
     uint16_t qf;                  /* the same, 0..65535: the average itself     */
     uint16_t seq;                 /* the last sequence number heard             */

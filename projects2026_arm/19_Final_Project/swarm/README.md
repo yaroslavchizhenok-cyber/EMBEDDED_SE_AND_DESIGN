@@ -18,7 +18,7 @@ rest among themselves, by radio, from what each one hears.
 | **Fault tolerance** | A silent drone is dropped after 3 s, and the others cover the cells it would have. Lost link or no route home: the drone flies back toward home, and resumes if it hears the swarm again. | *faults*, *killone*, *lostlink*, *loss*, *clocks* |
 | **Scalability** | 8 neighbour rows, at most 64 cells: **1,384 B per drone at any swarm size**, and about 630 B/s of radio per drone. | *scale*: 40 drones, 10 hops |
 | **Dynamic task allocation** | The survey cells are the tasks. Each mapper takes the nearest free cell that no nearer mapper is heading for, and avoids cells another drone is already over. A drone that crashes or goes home on battery simply stops taking cells, the others cover the rest, and once recharged it rejoins. | *battery*, *rejoin*, *faults*, *killone* |
-| **Heterogeneity** | Each board's straps make it a mapper (camera) or a relay (double-range radio). Mappers cover the area; relays fly but never map, lining up between the ground radio and the work. | *survey*, *hetero*, *relay* |
+| **Heterogeneity** | Every board is the same hardware. Its straps give it the role it **starts** in: mapper or relay. Mappers cover the area; relays fly but never map, lining up between the ground radio and the work. If the relay dies, one mapper, picked at random, takes over the role. | *survey*, *hetero*, *relay*, *standin* |
 
 ## Run it
 
@@ -62,11 +62,17 @@ for "sensor" as a sensor; this firmware reads it as a mapper.)
 | `f` | **follow** the mouse: on/off (see below) |
 | `x` | hold |
 | `h` | home |
-| `1`–`7` or click | select a drone: the map then shows *its* copy of the coverage map |
+| `1`–`7` or click | select a drone: the caption over the area says how many covered cells *it* knows of |
 | `k` | cut the selected drone's radio |
 | sliders | radio range and packet loss |
 | table's **link** column | each drone's pace, then frames lost / telemetry frames skipped per second |
 | command box | the selected drone's shell: `nbr`, `msn`, `kill`, `bat 25`, `stats`, `help` |
+
+**Covered cells (green).** A cell turns green once *any* drone has reported
+it covered for the current mission, and it stays green, even if that drone
+dies later. (Until 2026-11-26 the map showed only the selected drone's own
+copy, so selecting a dead drone, or a relay that hears little gossip, made
+the map look frozen.)
 
 **Follow the mouse (`f`).** While follow is on, the station posts a new GOTO
 mission at the pointer each time the pointer has moved 1 m, at most every
@@ -180,6 +186,26 @@ other four may be skipped to give its radio frames room.
   - **relay:** moves out along the line from the ground radio to the work, as
     far as its link back allows (`relay_spot`).
 
+  A relay is a **role**, not hardware: every radio has the same range (until
+  2026-11-26 a relay's radio had twice the range). If the relay dies, a mapper
+  takes its place (`maybe_stand_in`):
+  - Every beacon carries `ra`, the age of the sender's freshest news of a live
+    relay, so news of the relay spreads drone to drone.
+  - After 10 s with no such news, the mapper that ranks first among the flying
+    drones it hears **scouts**. The order is a hash of drone id and mission
+    number: random, but every drone works it out the same way. Far out, a relay
+    out of earshot sounds the same as a dead one, but a relay never leaves the
+    ground radio's reach. So the scout flies back toward the ground radio.
+  - If it meets news of the relay on the way, that was a false alarm: it goes
+    back to mapping. If it hears the ground radio and still no relay, the relay
+    is dead: the scout becomes the relay and its beacon says so.
+  - A drone that isn't flying a mission (on its pad, hovering, going home)
+    doesn't scout. It takes the role if it hears the ground radio, and waits
+    otherwise. So a relay that dies after the work is done, or on its pad, is
+    replaced too, and the next mission flies with the new relay.
+  - If two stand-ins meet (a split swarm joining up again), the one ranked
+    second goes back to mapping.
+
   When its own copy of the map is full, it flies home and lands.
 - **Talk.** It sends a beacon 5 times a second, relays the mission every 2 s,
   and gossips its coverage map once a second.
@@ -250,7 +276,7 @@ the fading edge of range no longer flaps in and out of the table.
 
 ## Test results
 
-`host\test.bat` runs 17 scenarios under 10 random seeds, 850 checks, all
+`host\test.bat` runs 18 scenarios under 10 random seeds, 940 checks, all
 passing. It then runs 29 checks on the station's own air code, all passing:
 a real-time survey, obstacles, and the slow-chip comparison above. The
 scenarios also passed under 30 seeds. A run counts as passed only if it
@@ -263,12 +289,13 @@ prints its summary, so a crash can't pass silently.
 | flock | 6 drones gathered within 3.3 m of the point; closest 1.8 m |
 | flock, out of reach | 44 m out with no relay, they came home by themselves after 60 s without a route |
 | multi-hop | mission reached all 7 drones in 0.33 s, though only 3 hear the ground radio; a broken chain is detected in about 4 s and heals |
-| survey | 6 mappers and a relay, 16 cells, all home on their own pads in 42 s; every mapper covered cells itself (2–4 each), the relay none |
+| survey | 6 mappers and a relay, 16 cells, all home on their own pads in 42 s; every mapper covered cells itself (2–4 each), the relay none; no mapper took the living relay's place |
 | faults | two of six mappers crash once mapping is under way (6–7 of 30 cells covered): the survivors finish the map |
 | battery, rejoin | a mapper's battery fails mid-survey: it goes home and the others finish; with a long job, it recharges and rejoins by itself |
 | killone | three drones; any one killed, on its pad or in the air, then a survey: the other two both fly, map it fully and come home (all 6 cases) |
 | loss, clocks | completes under 30% packet loss, and with chips running at 100 / 85 / 70% speed |
-| relay | a point 39 m out (radio 12 m): with no relay the workers wait at the edge; with two, the relays settle about 14 m and 34 m out and the workers spend 65–69% of 4 minutes at the point, linked home 100% of that time |
+| relay | every radio 15 m, a point 30 m out: the workers spend 1–3% of 4 minutes at the point with no relay, 61–68% with one, 70–73% with two (linked home 98–100% of that time with relays). Two relays settle about 12 m and 22–25 m out |
+| standin | 7 drones, a long survey (64 cells), the only relay killed 12 s in: several mappers scout and exactly one takes its place, 19–20 s after the kill (10 of 10 seeds). Never two relays at once; the stand-in maps nothing more; the others finish the map. Killed on its pad with no mission: a mapper takes the role 10 s later, and flies the next survey as relay. In all the other scenarios, a relay that is alive but out of earshot never caused a takeover |
 | follow | a new GOTO every 0.4 s: all six airborne in 4.3 s, trailing the goal by 5.8 m; a drone whose battery fails goes home, recharges and rejoins by itself |
 | outofreach | the follow goal dragged 50 m out (radio 15 m), then back: the swarm waits at the edge (farthest about 23 m), in touch 96–100% of the time, and is at the returned goal in 5–7 s; a drone landed by hand stays down through 60 s of follow goals and takes off for a new mission |
 | obstacles | a goal dead behind a 4 m column: round it in 13 s, never nearer its surface than 1.9 m; a wall of three touching columns: round the end, no stall; a flock of 6 through 8 random columns; a survey among 9 columns, one on a cell's centre, completes. No crash on 30 seeds, nearest any drone came to a column 0.91 m |
@@ -325,7 +352,7 @@ firmware builds for the chip, but three things only a Wokwi run will show:
 | `radio.c`, `radio.h` | the frames |
 | `shared_*.c` | the show's own `craft.c`, `pilot.c`, `trig.c`, `fmt.c` and `softfloat.c`, from `..\` |
 | `drone1\` … `drone7\` | each drone's `wokwi.toml` (its port) and `diagram.json` (its straps) |
-| `host\test_swarm.c` | the swarm on the PC: 17 scenarios (`-s SEED`, `-v`, `-c` close calls, `-t ID` trace) |
+| `host\test_swarm.c` | the swarm on the PC: 18 scenarios (`-s SEED`, `-v`, `-c` close calls, `-t ID` trace) |
 | `host\test_air.py` | the station's air with five `drone_pc.exe`, in real time; slow chips, paced and unpaced |
 | `host\drone_pc.c` | a test stand-in for one Wokwi window. It can act like a slow chip. Not part of the swarm |
 | `..\..\..\tools\station\swarm_station.py` | the station |

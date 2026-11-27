@@ -5,11 +5,12 @@
  * is thrown away by its checksum.  Nobody is addressed - everything is a
  * broadcast that whoever is in range hears.
  *
- *   $BCN,id,seq,x,y,z,vx,vy,vz,bat,mode,nn,type,hop,gx,gy,gs  5 x a second
+ *   $BCN,id,seq,x,y,z,vx,vy,vz,bat,mode,nn,type,hop,gx,gy,gs,ra  5 x a second
  *        the BEACON: who I am, where I believe I am (cm) and how fast (cm/s),
  *        battery %, mode (AG_*), neighbours I hear, my type (TY_*), my hops
  *        to the ground radio (HOP_NONE: no route), where I am heading (dm),
- *        and the newest ground-radio beacon number my route is built on
+ *        the newest ground-radio beacon number my route is built on, and
+ *        how old my freshest news of a live relay is (0.1 s; 255: none)
  *   $MSN,mid,kind,gx,gy,x0,y0,x1,y1                           relayed
  *        the MISSION, posted by the operator's ground radio and FLOODED
  *        drone to drone: a newer mid replaces an older one (agent.c)
@@ -35,7 +36,7 @@
 #define HOP_NONE     255u
 
 typedef struct {
-    uint8_t  id, mode, bat, nn, type, hop;
+    uint8_t  id, mode, bat, nn, type, hop, ra;
     uint16_t seq, gs;
     int32_t  x, y, z;              /* cm   */
     int32_t  vx, vy, vz;           /* cm/s */

@@ -79,9 +79,8 @@ static float frand(void) { return (float)(rnd() & 0xFFFFFF) / 16777216.0f; }
 
 static float reach(int a, int b)                 /* -1: the ground radio */
 {
-    float ga = a >= 0 && A[a].type == TY_RELAY ? 2.0f : 1.0f;
-    float gb = b >= 0 && A[b].type == TY_RELAY ? 2.0f : 1.0f;
-    return range_m * (ga + gb) / 2.0f;
+    (void)a;  (void)b;                            /* every radio the same: a relay is a role */
+    return range_m;
 }
 
 static v3_t where(int i) { return i < 0 ? (v3_t){ gnd_x, gnd_y, 1.0f } : A[i].body.pos; }
@@ -371,6 +370,18 @@ static int want(const char *name)
 /* the standard survey: 20 x 20 m north of the pads */
 static const float SX0 = 0, SY0 = 10, SX1 = 20, SY1 = 30;
 static void survey(void) { post(MS_SURVEY, SX0, SY0, SX1, SY1); }
+
+static int relays_alive(int *standins)
+{
+    int r = 0, si = 0;
+    for (int i = 0; i < N; i++) {
+        if (A[i].state == AG_DEAD || A[i].type != TY_RELAY) { continue; }
+        r++;
+        si += A[i].standin;
+    }
+    if (standins) { *standins = si; }
+    return r;
+}
 
 /* every drone that is not a relay covered cells of the map itself */
 static int all_mapped(void)
@@ -667,6 +678,9 @@ int main(int argc, char **argv)
         printf("\n");
         check(all_mapped(), "all six mappers flew and covered cells themselves");
         check(A[3].covered == 0, "the relay flew but mapped nothing: it keeps the others in touch");
+        int si = 0;
+        for (int i = 0; i < 7; i++) { si += A[i].standin; }
+        check(si == 0, "the relay lived, so no mapper took its place - though some flew out of its earshot");
         float on_line = fabsf((relay.x - 6) * (20 + 4) - (relay.y + 4) * (10 - 6)) / sqrtf(24 * 24 + 4 * 4);
         check(on_line < 3.0f && relay.y > 1 && relay.y < 18 && relay.z > 3, "at 12 s the relay hovered between the "
               "ground radio and the area at (%.1f, %.1f, %.1f), %.1f m off the line", relay.x, relay.y, relay.z, on_line);
@@ -788,9 +802,9 @@ int main(int argc, char **argv)
 
     /* ================================================================== */
     if (want("relay")) {
-        printf("== RELAY: holding a point 39 m from the ground radio (radio range 12 m) ==\n");
-        /* ground radio -> relay 18 m, relay -> relay 24 m, relay -> drone 18 m, drone -> drone 12 m,
-         * all fading over their last quarter: one relay cannot bridge 39 m, a chain of two can -
+        printf("== RELAY: holding a point 30 m from the ground radio (radio range 15 m, every radio the same) ==\n");
+        /* every link reaches 15 m, fading over its last quarter, so about 11 m is reliable:
+         * one relay cannot bridge 30 m (2 links), a chain of two can (3 links) -
          * if the relays find their places, knowing none of these numbers */
         static const uint8_t crews[3][6] = {
             { TY_MAPPER, TY_MAPPER, TY_MAPPER, TY_MAPPER, TY_MAPPER, TY_MAPPER },   /* no relay   */
@@ -801,16 +815,16 @@ int main(int argc, char **argv)
         int gave_up[3];
         v3_t rpos[2] = { { 0 } };
         for (int pass = 0; pass < 3; pass++) {
-            world(6, crews[pass], 12.0f);
+            world(6, crews[pass], 15.0f);
             run(2000);
-            post(MS_GOTO, 10, 35, 0, 0);
+            post(MS_GOTO, 10, 26, 0, 0);
             long routed = 0, there = 0, samples = 0;
             for (int k = 0; k < 24000; k++) {            /* 4 minutes */
                 step();
                 for (int i = 0; i < 6; i++) {
                     if (A[i].type == TY_RELAY) { continue; }
                     samples++;
-                    int at = A[i].state == AG_FLYING && flat(A[i].body.pos, (v3_t){ 10, 35, 0 }) < 8.0f;
+                    int at = A[i].state == AG_FLYING && flat(A[i].body.pos, (v3_t){ 10, 26, 0 }) < 8.0f;
                     there += at;
                     routed += at && A[i].hop != HOP_NONE;
                 }
@@ -833,7 +847,7 @@ int main(int argc, char **argv)
             for (int i = 0; i < 6; i++) { gave_up[pass] += A[i].finished_any && A[i].finished_mid == mid; }
             if (pass == 2) {
                 printf("    90 s in, the relays had placed themselves at (%.1f, %.1f) and (%.1f, %.1f): %.0f and %.0f m "
-                       "from the ground radio at (%.0f, %.0f); the point is 39 m out\n", rpos[0].x, rpos[0].y, rpos[1].x,
+                       "from the ground radio at (%.0f, %.0f); the point is 30 m out\n", rpos[0].x, rpos[0].y, rpos[1].x,
                        rpos[1].y, flat(rpos[0], where(-1)), flat(rpos[1], where(-1)), gnd_x, gnd_y);
             }
         }
@@ -1084,6 +1098,69 @@ int main(int argc, char **argv)
             all_ok &= ok && full;
         }
         check(all_ok, "with any one of the three killed, on its pad or in the air, the other two survey the area");
+        int si = 0;
+        for (int i = 0; i < 3; i++) { si += A[i].type == TY_RELAY; }
+        check(si == 0, "a swarm that never had a relay gets none: no mapper took that role");
+    }
+
+    /* ================================================================== */
+    if (want("standin")) {
+        printf("== THE RELAY DIES: a mapper, picked at random, takes its place ==\n");
+        world(7, mix, 12.0f);                             /* D4 is the relay */
+        run(2000);
+        post(MS_SURVEY, -10, 10, 30, 50);                 /* 8 x 8 cells, out to 50 m: a long job */
+        run(12000);
+        current = 3;  agent_kill(&A[3]);  current = -1;
+        uint32_t t0 = T, t_in = 0;
+        int most = 0, who = -1, done_cells = 0;
+        while (T - t0 < 300000) {
+            step();
+            int si;
+            int r = relays_alive(&si);
+            if (T - t0 > 2000 && r > most) { most = r; }
+            if (!t_in && si > 0) {
+                t_in = T - t0;
+                for (int i = 0; i < 7; i++) { if (A[i].standin) { who = i; } }
+                done_cells = who >= 0 ? A[who].covered : 0;
+            }
+            if (mission_over()) { break; }
+        }
+        int si;
+        int r = relays_alive(&si);
+        printf("    relay D4 killed at %.0f s; D%d took its place %.1f s later (most relays alive at once: %d)\n",
+               t0 / 1000.0, who + 1, t_in / 1000.0, most);
+        check(t_in > 0 && t_in < 30000, "a mapper took the dead relay's place within 30 s (%.1f s)", t_in / 1000.0);
+        check(r == 1 && si == 1 && most == 1, "exactly one: never two relays alive at once");
+        check(who >= 0 && A[who].covered == done_cells, "and once a relay, it mapped nothing more (it had covered %d cells)",
+              done_cells);
+        int full = 1;
+        for (int i = 0; i < 7; i++) { if (A[i].state != AG_DEAD) { full &= cover_done(&A[i].cv); } }
+        check(mission_over() && full, "the other mappers finished the map; everyone home");
+
+        /* five drones, all on their pads, no mission: the relay dies there */
+        world(5, mix, 12.0f);
+        run(3000);
+        current = 3;  agent_kill(&A[3]);  current = -1;
+        t0 = T;  t_in = 0;  most = 0;  who = -1;
+        while (T - t0 < 30000) {
+            step();
+            int r2 = relays_alive(&si);
+            if (r2 > most) { most = r2; }
+            if (!t_in && si > 0) {
+                t_in = T - t0;
+                for (int i = 0; i < 5; i++) { if (A[i].standin) { who = i; } }
+            }
+        }
+        printf("    on the pads: D%d took the relay's place %.1f s after it died\n", who + 1, t_in / 1000.0);
+        check(t_in > 0 && t_in < 20000 && most == 1 && relays_alive(&si) == 1,
+              "the relay died on its pad: exactly one mapper took its role there, in %.1f s", t_in / 1000.0);
+        post(MS_SURVEY, 0, 10, 20, 30);
+        uint32_t t1 = T;
+        while (T - t1 < 180000 && !mission_over()) { step(); }
+        full = 1;
+        for (int i = 0; i < 5; i++) { if (A[i].state != AG_DEAD) { full &= cover_done(&A[i].cv); } }
+        check(who >= 0 && mission_over() && full && A[who].covered == 0 && A[who].type == TY_RELAY,
+              "then a survey: the new relay flew as relay (mapped nothing), the others mapped it all");
     }
 
     /* ================================================================== */

@@ -79,6 +79,8 @@ static uint32_t roll(agent_t *a)
 }
 
 
+static int maybe_stand_in(agent_t *a, int may_scout);
+
 static float flat(v3_t p, v3_t q) { float dx = p.x - q.x, dy = p.y - q.y; return t_sqrt(dx * dx + dy * dy); }
 
 static int due(uint32_t now, uint32_t *at, uint32_t every)
@@ -95,7 +97,7 @@ void agent_init(agent_t *a, uint8_t id, uint8_t type, emit_fn emit)
     memset(a, 0, sizeof *a);
     a->emit = emit;
     a->id = id;
-    a->type = type == TY_RELAY ? TY_RELAY : TY_MAPPER;   /* straps 0 or 1: a mapper */
+    a->type = type == TY_RELAY ? TY_RELAY : TY_MAPPER;   /* the role it starts in: straps 0 or 1, mapper */
     a->hop = HOP_NONE;
     a->closest = 99.0f;
     nbr_init(&a->nb);
@@ -402,6 +404,9 @@ static void think(agent_t *a)
     for (unsigned i = 0; i < a->nobs;) {                   /* out of sight: forgotten */
         if (now - a->obs[i].seen_ms > OBS_KEEP_MS) { a->obs[i] = a->obs[--a->nobs]; } else { i++; }
     }
+    /* the relay's role is taken in any state - on the pad, hovering, going
+     * home; only a drone flying a mission may go and look (below) */
+    if (!(working && a->state == AG_FLYING)) { maybe_stand_in(a, 0); }
 
     if (a->state == AG_GROUND) {
         if (working && my_part_done(a) && !a->done_m) {   /* the gossip says it is over */
@@ -458,8 +463,10 @@ static void think(agent_t *a)
     if (a->has_m && a->m.kind == MS_HOME)                  { go_home(a, WHY_ORDER); return; }
 
     a->has_goal = 1;
-    if (!working) { a->goal = a->hold;  return; }          /* no mission, or HOLD */
+    if (!working) { a->goal = a->hold;  a->scout = 0;  return; }   /* no mission, or HOLD */
+    if (maybe_stand_in(a, 1)) { return; }                  /* gone to look for the relay */
     if (a->type == TY_RELAY) {
+        a->relay_ms = now;  a->relay_known = 1;
         a->goal = relay_spot(a);
         if (my_part_done(a)) { complete(a); }
         return;
@@ -540,6 +547,8 @@ static void beacon(agent_t *a)
         .x = cm(p->est.x), .y = cm(p->est.y), .z = cm(p->est.z),
         .vx = cm(p->est_v.x), .vy = cm(p->est_v.y), .vz = cm(p->est_v.z),
         .gx = dm(g.x), .gy = dm(g.y), .gs = a->gs,
+        .ra = a->type == TY_RELAY ? 0u : !a->relay_known ? 255u
+            : a->now_ms - a->relay_ms > 25400u ? 254u : (uint8_t)((a->now_ms - a->relay_ms) / 100u),
     };
     char line[RADIO_LINE];
     bcn_encode(&b, line, sizeof line);
@@ -663,6 +672,90 @@ void agent_tick(agent_t *a)
 }
 
 /* ---- the radio, in -------------------------------------------------------------------- */
+/* A stand-in relay's "random" rank for this mission: every drone works out
+ * the same order from the drone ids and the mission number, and the order
+ * changes from one mission to the next.  Lower goes first. */
+static uint32_t rank(const agent_t *a, uint8_t id)
+{
+    uint32_t h = (uint32_t)id * 2654435761u ^ (uint32_t)a->m.mid * 40503u;
+    h ^= h >> 15;  h *= 0x2C1B3C6Du;  h ^= h >> 12;
+    return h;
+}
+
+/* What a beacon says about the swarm's relay: it IS one (news, now), or it
+ * says how old its own news of one is - passed on drone to drone, each hop
+ * 0.2 s older, so drones that never hear the relay still know it lives.  And
+ * the step-back rule: a stand-in that meets a relay ranked before it goes
+ * back to mapping (two stand-ins: a split swarm that has joined again). */
+static void relay_news(agent_t *a, const bcn_t *b)
+{
+    uint32_t now = a->now_ms;
+    if (b->type == TY_RELAY) {
+        a->relay_ms = now;
+        a->relay_known = 1;
+        if (a->standin && a->type == TY_RELAY && rank(a, b->id) < rank(a, a->id)) {
+            a->type = TY_MAPPER;
+            a->standin = 0;
+            say(a, "drone %u is relay too, and ranks before me: back to mapping\n", (unsigned)b->id);
+        }
+    } else if (b->ra != 255u && (uint32_t)b->ra * 100u + 200u < now) {
+        uint32_t t = now - (uint32_t)b->ra * 100u - 200u;
+        if (!a->relay_known || (int32_t)(t - a->relay_ms) > 0) { a->relay_ms = t; }
+        a->relay_known = 1;
+    }
+}
+
+/* Is the relay dead?  No drone I hear has had news of one for RELAY_GONE_MS.
+ * Far out, a relay out of earshot sounds just like a dead one - but a relay
+ * never leaves the ground radio's reach.  So the mapper first in this
+ * mission's "random" order among the flying drones I hear (each runs the same
+ * test on the same beacons: normally exactly one) SCOUTS: it flies back
+ * toward the ground radio.  It meets the relay on the way: false alarm, back
+ * to mapping.  It hears the ground radio and still no relay: the relay is
+ * dead, and it takes its place.  A drone not flying a mission (on its pad,
+ * hovering, going home) does not go and look: it takes the place if it hears
+ * the ground radio, and otherwise waits.  Returns 1 while scouting (goal set). */
+static int maybe_stand_in(agent_t *a, int may_scout)
+{
+    uint32_t now = a->now_ms;
+    if (a->type != TY_MAPPER || !a->relay_known || now - a->relay_ms < RELAY_GONE_MS) {
+        if (a->scout) { a->scout = 0;  say(a, "news of the relay: it lives - back to mapping\n"); }
+        return 0;
+    }
+    if (!a->scout) {                             /* who goes?  (once gone, I go on) */
+        uint32_t mine = rank(a, a->id);
+        int heard = 0;
+        for (unsigned i = 0; i < a->nb.n; i++) {
+            const nbr_t *o = &a->nb.e[i];
+            if (now - o->heard_ms >= 1000u) { continue; }    /* (the dead are silent) */
+            heard = 1;
+            if (o->type == TY_MAPPER && rank(a, o->id) < mine) { return 0; }   /* someone goes before me */
+        }
+        if (!heard) { return 0; }    /* I hear nobody: no one to relay for - or my own radio is dead */
+    }
+    if (!a->gnd_ms || now - a->gnd_ms >= GND_FRESH_MS) {
+        if (!may_scout) { a->scout = 0;  return 0; }
+        if (!a->scout) {
+            a->scout = 1;
+            say(a, "no news of the relay for %u s: going to look\n", (unsigned)(RELAY_GONE_MS / 1000u));
+        }
+        a->goal = (v3_t){ a->m.gx, a->m.gy, a->cruise };
+        return 1;
+    }
+    a->scout = 0;
+    a->type = TY_RELAY;
+    a->standin = 1;
+    a->relay_ms = now;
+    /* start the relay rule from where I am, not from the pad */
+    float cx = a->m.x0, cy = a->m.y0;
+    if (a->m.kind == MS_SURVEY) { cx = 0.5f * (a->m.x0 + a->m.x1);  cy = 0.5f * (a->m.y0 + a->m.y1); }
+    float gx = cx - a->m.gx, gy = cy - a->m.gy, gl = gx * gx + gy * gy;
+    float f = gl > 0.01f ? ((a->brain.est.x - a->m.gx) * gx + (a->brain.est.y - a->m.gy) * gy) / gl : 0.2f;
+    a->relay_f = f < 0.05f ? 0.05f : f > 0.9f ? 0.9f : f;
+    say(a, "the ground radio, but no relay: taking its place\n");
+    return 0;
+}
+
 static void heard(agent_t *a, const char *line)
 {
     bcn_t b;
@@ -677,6 +770,7 @@ static void heard(agent_t *a, const char *line)
     if (r == NBR_FAR) { a->rx_far++; return; }
     a->rx++;
     a->heard_ms = a->now_ms;
+    relay_news(a, &b);
     if (out) { say(a, "-nbr %u: table full, made room\n", (unsigned)out); }
     if (r == NBR_NEW) {
         const nbr_t *n = nbr_find(&a->nb, b.id);
